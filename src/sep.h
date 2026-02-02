@@ -60,6 +60,9 @@
 /* filter types for sep_extract */
 #define SEP_FILTER_CONV 0
 #define SEP_FILTER_MATCHED 1
+/* deblending methods for sep_extract */
+#define SEP_DEBLEND_THRESH 0
+#define SEP_DEBLEND_WATERSHED 1
 
 /* structs ------------------------------------------------------------------*/
 
@@ -240,6 +243,8 @@ SEP_API int sep_extract(
     int filter_type, /* convolution (0) or matched (1)  [0] */
     int deblend_nthresh, /* deblending thresholds          [32] */
     double deblend_cont, /* min. deblending contrast    [0.005] */
+    double deblend_fwhm, /* deblend PSF FWHM (pixels)      [0.0] */
+    int deblend_method, /* deblending method              [0] */
     int clean_flag, /* perform cleaning?               [1] */
     double clean_param, /* clean parameter               [1.0] */
     sep_catalog ** catalog

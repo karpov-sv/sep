@@ -60,6 +60,8 @@ int sortit(
     objliststruct * finalobjlist,
     int deblend_nthresh,
     double deblend_mincont,
+    double deblend_fwhm,
+    int deblend_method,
     double gain,
     deblendctx * deblendctx
 );
@@ -214,6 +216,8 @@ int sep_extract(
     int filter_type,
     int deblend_nthresh,
     double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
     int clean_flag,
     double clean_param,
     sep_catalog ** catalog
@@ -754,6 +758,8 @@ int sep_extract(
                       finalobjlist,
                       deblend_nthresh,
                       deblend_cont,
+                      deblend_fwhm,
+                      deblend_method,
                       image->gain,
                       &deblendctx
                   );
@@ -921,6 +927,8 @@ int sortit(
     objliststruct * finalobjlist,
     int deblend_nthresh,
     double deblend_mincont,
+    double deblend_fwhm,
+    int deblend_method,
     double gain,
     deblendctx * deblendctx
 ) {
@@ -948,7 +956,14 @@ int sortit(
   preanalyse(0, objlist);
 
   status = deblend(
-      objlist, &objlistout, deblend_nthresh, deblend_mincont, minarea, deblendctx
+      objlist,
+      &objlistout,
+      deblend_nthresh,
+      deblend_mincont,
+      deblend_fwhm,
+      deblend_method,
+      minarea,
+      deblendctx
   );
   if (status) {
     /* formerly, this wasn't a fatal error, so a flag was set for

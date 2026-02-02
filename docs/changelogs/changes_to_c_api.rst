@@ -69,6 +69,8 @@ All changes here are transparent to users of the Python interface.
 
  - The type of ``convw`` and ``convh`` has changed from ``int`` to
    ``int64_t``.
+ - Added ``deblend_fwhm`` parameter to enable fixed-PSF deblending.
+ - Added ``deblend_method`` parameter to select deblending algorithm.
 
 .. c:function:: int sep_sum_circann_multi()
 

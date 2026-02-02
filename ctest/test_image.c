@@ -291,6 +291,8 @@ int main(int argc, char ** argv) {
       SEP_FILTER_CONV,
       32,
       1.0,
+      0.0,
+      SEP_DEBLEND_THRESH,
       1,
       1.0,
       &catalog

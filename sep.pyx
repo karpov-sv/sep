@@ -41,6 +41,9 @@ DEF SEP_NOISE_VAR = 2
 # filter types for sep_extract
 DEF SEP_FILTER_CONV = 0
 DEF SEP_FILTER_MATCHED = 1
+# deblend methods for sep_extract
+DEF SEP_DEBLEND_THRESH = 0
+DEF SEP_DEBLEND_WATERSHED = 1
 
 # Threshold types
 DEF SEP_THRESH_REL = 0
@@ -149,6 +152,8 @@ cdef extern from "sep.h":
                     int filter_type,
                     int deblend_nthresh,
                     double deblend_cont,
+                    double deblend_fwhm,
+                    int deblend_method,
                     int clean_flag,
                     double clean_param,
                     sep_catalog **catalog)
@@ -617,11 +622,13 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
             np.ndarray filter_kernel=default_kernel, filter_type='matched',
             int deblend_nthresh=32, double deblend_cont=0.005,
             bint clean=True, double clean_param=1.0,
-            segmentation_map=None):
+            segmentation_map=None, double deblend_fwhm=0.0,
+            deblend_method='threshold'):
     """extract(data, thresh, err=None, mask=None, minarea=5,
                filter_kernel=default_kernel, filter_type='matched',
                deblend_nthresh=32, deblend_cont=0.005, clean=True,
-               clean_param=1.0, segmentation_map=False)
+               clean_param=1.0, segmentation_map=False, deblend_fwhm=0.0,
+               deblend_method='threshold')
 
     Extract sources from an image.
 
@@ -672,6 +679,17 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     deblend_cont : float, optional
         Minimum contrast ratio used for object deblending. Default is 0.005.
         To entirely disable deblending, set to 1.0.
+    deblend_fwhm : float, optional
+        If > 0, use a fixed circular Gaussian with this FWHM (in pixels)
+        when assigning ambiguous pixels during deblending. This uses a
+        deterministic max-weight assignment and is less sensitive to
+        moment estimates in crowded fields. Default is 0.0 (use adaptive
+        shapes and stochastic assignment). When ``deblend_method='watershed'``,
+        this also enforces a minimum peak separation of 0.5*FWHM.
+    deblend_method : {'threshold', 'watershed'} or int, optional
+        Deblending algorithm. ``'threshold'`` (default) uses the traditional
+        multi-threshold method. ``'watershed'`` seeds local maxima and applies
+        watershed assignment within each detection footprint.
     clean : bool, optional
         Perform cleaning? Default is True.
     clean_param : float, optional
@@ -780,6 +798,16 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     else:
         raise ValueError("unknown filter_type: {!r}".format(filter_type))
 
+    if isinstance(deblend_method, str):
+        if deblend_method == 'threshold':
+            deblend_methodcode = SEP_DEBLEND_THRESH
+        elif deblend_method == 'watershed':
+            deblend_methodcode = SEP_DEBLEND_WATERSHED
+        else:
+            raise ValueError("unknown deblend_method: {!r}".format(deblend_method))
+    else:
+        deblend_methodcode = int(deblend_method)
+
     # If image has error info, the threshold is relative, otherwise
     # it is absolute.
     if im.noise_type == SEP_NOISE_NONE:
@@ -790,7 +818,9 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     status = sep_extract(&im,
                          thresh, thresh_type, minarea,
                          kernelptr, kernelw, kernelh, filter_typecode,
-                         deblend_nthresh, deblend_cont, clean, clean_param,
+                         deblend_nthresh, deblend_cont, deblend_fwhm,
+                         deblend_methodcode,
+                         clean, clean_param,
                          &catalog)
     _assert_ok(status)
 
