@@ -1092,7 +1092,7 @@ def sum_circann(np.ndarray data not None, x, y, rin, rout,
                 var=None, err=None, gain=None, np.ndarray mask=None,
                 double maskthresh=0.0, seg_id=None, np.ndarray segmap=None,
                 int subpix=5):
-    """sum_circann(data, x, y, rin, rout, err=None, var=None, mask=None,
+    """sum_circann(data, x, y, rin, rout, var=None, err=None, mask=None,
                    maskthresh=0.0, seg_id=None, segmap=None, gain=None,
                    subpix=5)
 
@@ -1111,8 +1111,8 @@ def sum_circann(np.ndarray data not None, x, y, rin, rout,
         element of the array. These inputs obey numpy broadcasting rules.
         It is required that ``rout >= rin >= 0.0``.
 
-    err, var : float or ndarray
-        Error *or* variance (specify at most one).
+    var, err : float or ndarray
+        Variance *or* error (specify at most one).
 
     mask : `~numpy.ndarray`, optional
         Mask array. If supplied, a given pixel is masked if its value
