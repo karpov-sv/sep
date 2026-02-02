@@ -353,7 +353,7 @@ static int deblend_watershed(
 
   status = RETURN_OK;
   pixel = objlistin->plist;
-  deb_minarea = minarea < MAXDEBAREA ? minarea : MAXDEBAREA;
+  deb_minarea = minarea;
   min_peak_sep = (deblend_fwhm > 0.0 && isfinite(deblend_fwhm))
                      ? 0.5 * deblend_fwhm
                      : 0.0;
