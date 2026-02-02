@@ -1161,6 +1161,8 @@ int sep_windowed(
     double sig,
     int subpix,
     short inflag,
+    int id,
+    double maxstep,
     double * xout,
     double * yout,
     int * niter,
@@ -1170,12 +1172,12 @@ int sep_windowed(
   double dx, dy, dx1, dy2, offset, scale, scale2, tmp, dxpos, dypos, weight;
   double maskarea, maskweight, maskdxpos, maskdypos;
   double r, tv, twv, sigtv, totarea, overlap, rpix2, invtwosig2;
-  double wpix;
-  int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize;
-  int i, status;
+  double wpix, step, step_scale;
+  int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize, ssize;
+  int i, status, ismasked;
   short errisarray, errisstd;
-  const BYTE *datat, *errort, *maskt;
-  converter convert, econvert, mconvert;
+  const BYTE *datat, *errort, *maskt, *segt;
+  converter convert, econvert, mconvert, sconvert;
   double r2, r_in2, r_out2;
 
   /* input checks */
@@ -1187,16 +1189,22 @@ int sep_windowed(
   }
 
   /* initializations */
-  size = esize = msize = 0;
+  size = esize = msize = ssize = 0;
   tv = sigtv = 0.0;
   overlap = totarea = maskweight = 0.0;
-  datat = maskt = NULL;
+  datat = maskt = segt = NULL;
   errort = im->noise;
   *flag = 0;
   varpix = 0.0;
-  scale = 1.0 / subpix;
-  scale2 = scale * scale;
-  offset = 0.5 * (scale - 1.0);
+  if (subpix > 0) {
+    scale = 1.0 / subpix;
+    scale2 = scale * scale;
+    offset = 0.5 * (scale - 1.0);
+  } else {
+    scale = 0.0;
+    scale2 = 0.0;
+    offset = 0.0;
+  }
   invtwosig2 = 1.0 / (2.0 * sig * sig);
   errisarray = 0;
   errisstd = 0;
@@ -1213,6 +1221,9 @@ int sep_windowed(
     return status;
   }
   if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize))) {
+    return status;
+  }
+  if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
     return status;
   }
 
@@ -1253,6 +1264,9 @@ int sep_windowed(
       }
       if (im->mask) {
         maskt = MSVC_VOID_CAST im->mask + pos * msize;
+      }
+      if (im->segmap) {
+        segt = MSVC_VOID_CAST im->segmap + pos * ssize;
       }
 
       /* loop over pixels in this row */
@@ -1299,7 +1313,33 @@ int sep_windowed(
           /* weight by gaussian */
           weight = exp(-rpix2 * invtwosig2);
 
+          ismasked = 0;
           if (im->mask && (mconvert(maskt) > im->maskthresh)) {
+            ismasked = 1;
+          }
+
+          /* Segmentation image:
+
+               If `id` is negative, require segmented pixels within the
+               aperture.
+
+               If `id` is positive, mask pixels with nonzero segment ids
+               not equal to `id`.
+
+          */
+          if (im->segmap) {
+            if (id > 0) {
+              if ((sconvert(segt) > 0.) && (sconvert(segt) != id)) {
+                ismasked = 1;
+              }
+            } else {
+              if (sconvert(segt) != -1 * id) {
+                ismasked = 1;
+              }
+            }
+          }
+
+          if (ismasked) {
             *flag |= SEP_APER_HASMASKED;
             maskarea += overlap;
             maskweight += overlap * weight;
@@ -1323,6 +1363,7 @@ int sep_windowed(
           errort += esize;
         }
         maskt += msize;
+        segt += ssize;
       } /* closes loop over x */
     } /* closes loop over y */
 
@@ -1339,7 +1380,11 @@ int sep_windowed(
      * the masked pixels had the value of the average unmasked value
      * in the aperture.
      */
-    if (im->mask) {
+    if (im->mask || im->segmap) {
+      if (totarea > 0.0 && maskarea >= totarea) {
+        *flag |= SEP_APER_ALLMASKED;
+        break;
+      }
       /* this option will probably not yield accurate values */
       if (inflag & SEP_MASK_IGNORE) {
         totarea -= maskarea;
@@ -1353,8 +1398,18 @@ int sep_windowed(
 
     /* update center */
     if (twv > 0.0) {
-      x += (dxpos /= twv) * WINPOS_FAC;
-      y += (dypos /= twv) * WINPOS_FAC;
+      dxpos = (dxpos / twv) * WINPOS_FAC;
+      dypos = (dypos / twv) * WINPOS_FAC;
+      if (maxstep > 0.0) {
+        step = sqrt(dxpos * dxpos + dypos * dypos);
+        if (step > maxstep) {
+          step_scale = maxstep / step;
+          dxpos *= step_scale;
+          dypos *= step_scale;
+        }
+      }
+      x += dxpos;
+      y += dypos;
     } else {
       break;
     }

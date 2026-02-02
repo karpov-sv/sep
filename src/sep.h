@@ -466,6 +466,8 @@ SEP_API int sep_kron_radius(
  *              radius is 4 * sig.
  * subpix     : Subpixels to use in aperture-pixel overlap.
  *              SExtractor uses 11. 0 is supported for exact overlap.
+ * id         : Segmentation id for masking (see sep_sum_circle semantics).
+ * maxstep    : Maximum step size per iteration. <= 0 disables limiting.
  * xout, yout : output center.
  * niter      : number of iterations used.
  */
@@ -476,6 +478,8 @@ SEP_API int sep_windowed(
     double sig,
     int subpix,
     short inflag,
+    int id,
+    double maxstep,
     double * xout,
     double * yout,
     int * niter,

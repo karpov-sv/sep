@@ -198,7 +198,8 @@ cdef extern from "sep.h":
                         double *kronrad, short *flag)
 
     int sep_windowed(const sep_image *image,
-                     double x, double y, double sig, int subpix, short inflag,
+                     double x, double y, double sig,
+                     int subpix, short inflag, int id, double maxstep,
                      double *xout, double *yout, int *niter, short *flag)
 
     int sep_ellipse_axes(double cxx, double cyy, double cxy,
@@ -2118,9 +2119,10 @@ def kron_radius(np.ndarray data not None, x, y, a, b, theta, r,
 
 def winpos(np.ndarray data not None, xinit, yinit, sig,
            np.ndarray mask=None, double maskthresh=0.0, int subpix=11,
-           double minsig=2.0/2.35*0.5):
+           double minsig=2.0/2.35*0.5, seg_id=None, np.ndarray segmap=None,
+           maxstep=None):
     """winpos(data, xinit, yinit, sig, mask=None, maskthresh=0.0, subpix=11,
-              minsig=2.0/2.35*0.5)
+              minsig=2.0/2.35*0.5, seg_id=None, segmap=None, maxstep=None)
 
     Calculate more accurate object centroids using 'windowed' algorithm.
 
@@ -2168,6 +2170,26 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
         Source Extractor uses a minimum half-light radius of 0.5 pixels,
         equivalent to a sigma of 0.5 * 2.0 / 2.35.
 
+    segmap : `~numpy.ndarray`, optional
+        Segmentation image with dimensions of ``data`` and dtype ``np.int32``.
+        This is an optional input and corresponds to the segmentation map
+        output by `~sep.extract`.
+
+    seg_id : array_like, optional
+        Array of segmentation ids used to mask additional pixels in the image.
+        Dimensions correspond to the dimensions of ``xinit`` and ``yinit``.
+        The behavior differs depending on whether ``seg_id`` is negative or
+        positive. If ``seg_id`` is positive, all pixels belonging to other
+        objects are masked. (Pixel ``j, i`` is masked if ``seg[j, i] != seg_id
+        and seg[j, i] != 0``). If ``seg_id`` is negative, all pixels other
+        than those belonging to the object of interest are masked. (Pixel ``j,
+        i`` is masked if ``seg[j, i] != -seg_id``).  NB: must be included if
+        ``segmap`` is provided.
+
+    maxstep : float or array_like, optional
+        Maximum step size per iteration in pixels. If ``None`` or <= 0,
+        no step limiting is applied.
+
     Returns
     -------
     x, y : np.ndarray
@@ -2180,10 +2202,16 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
 
     cdef int status
     cdef double cxx, cyy, cxy, sigval
+    cdef double maxstepval
     cdef int niter = 0  # not currently returned
     cdef sep_image im
 
-    _parse_arrays(data, None, None, mask, None, &im)
+    # Test for segmap without seg_id.  Nothing happens if seg_id supplied but
+    # without segmap.
+    if (segmap is not None) and (seg_id is None):
+        raise ValueError('`segmap` supplied but not `seg_id`.')
+
+    _parse_arrays(data, None, None, mask, segmap, &im)
     im.maskthresh = maskthresh
 
     # See note in apercirc on requiring specific array type
@@ -2191,6 +2219,17 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     xinit = np.require(xinit, dtype=dt)
     yinit = np.require(yinit, dtype=dt)
     sig = np.require(sig, dtype=dt)
+    if maxstep is None:
+        maxstep = 0.0
+    maxstep = np.require(maxstep, dtype=dt)
+
+    # Segmentation image and ids with same dimensions as xinit, yinit, etc.
+    if seg_id is not None:
+        seg_id = np.require(seg_id, dtype=np.int32)
+        if seg_id.shape != xinit.shape:
+            raise ValueError('Shapes of `xinit` and `seg_id` do not match')
+    else:
+        seg_id = np.zeros(len(xinit), dtype=np.int32)
 
     # allocate output arrays
     shape = np.broadcast(xinit, yinit, sig).shape
@@ -2198,9 +2237,10 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     y = np.empty(shape, np.float64)
     flag = np.empty(shape, np.short)
 
-    it = np.broadcast(xinit, yinit, sig, x, y, flag)
+    it = np.broadcast(xinit, yinit, sig, maxstep, seg_id, x, y, flag)
     while np.PyArray_MultiIter_NOTDONE(it):
         sigval = (<double*>np.PyArray_MultiIter_DATA(it, 2))[0]
+        maxstepval = (<double*>np.PyArray_MultiIter_DATA(it, 3))[0]
         if sigval < minsig:
             sigval = minsig
         status = sep_windowed(&im,
@@ -2208,10 +2248,12 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
                               (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
                               sigval,
                               subpix, 0,
-                              <double*>np.PyArray_MultiIter_DATA(it, 3),
-                              <double*>np.PyArray_MultiIter_DATA(it, 4),
+                              (<int*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                              maxstepval,
+                              <double*>np.PyArray_MultiIter_DATA(it, 5),
+                              <double*>np.PyArray_MultiIter_DATA(it, 6),
                               &niter,
-                              <short*>np.PyArray_MultiIter_DATA(it, 5))
+                              <short*>np.PyArray_MultiIter_DATA(it, 7))
         _assert_ok(status)
         np.PyArray_MultiIter_NEXT(it)
 
