@@ -76,6 +76,18 @@ All changes here are transparent to users of the Python interface.
 
  - The type of ``n`` has changed from ``int`` to ``int64_t``.
 
+.. c:function:: int sep_sum_circle_optimal()
+
+ - Added optimal-extraction circular aperture photometry.
+
+.. c:function:: int sep_sum_circle_optimal_multi()
+
+ - Added grouped optimal-extraction circular aperture photometry.
+
+.. c:function:: int sep_sum_circle_optimal_multi_bkg()
+
+ - Added grouped optimal-extraction photometry with group-local background
+   subtraction.
 
 .. c:function:: int sep_stats_circann()
 

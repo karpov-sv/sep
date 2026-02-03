@@ -4,6 +4,7 @@
 
 from __future__ import division, print_function
 
+import math
 import os
 
 import numpy as np
@@ -157,6 +158,25 @@ def matched_filter_snr(data, noise, kernel):
             out[y, x] = np.sum(d * k * w) / np.sqrt(np.sum(k**2 * w))
 
     return out
+
+
+_ERF = np.vectorize(math.erf, otypes=[float])
+
+
+def _gaussian_pixel_integral(dx, dy, sigma):
+    inv = 1.0 / (np.sqrt(2.0) * sigma)
+    ex = _ERF((dx + 0.5) * inv) - _ERF((dx - 0.5) * inv)
+    ey = _ERF((dy + 0.5) * inv) - _ERF((dy - 0.5) * inv)
+    return 0.25 * ex * ey
+
+
+def _gaussian_scene(shape, x, y, fwhm, flux):
+    yy, xx = np.indices(shape)
+    sigma = fwhm / 2.354820045
+    image = np.zeros(shape, dtype=float)
+    for xi, yi, fi in zip(x, y, flux):
+        image += fi * _gaussian_pixel_integral(xx - xi, yy - yi, sigma)
+    return image
 
 
 # -----------------------------------------------------------------------------
@@ -782,6 +802,49 @@ def test_apertures_exact():
                 data, x, y, 1.0, ratio, theta, r, rout, subpix=0
             )
             assert_allclose(flux, np.pi * ratio * (rout**2 - r**2))
+
+
+def test_sum_circle_optimal_grouped_close_pair():
+    shape = (41, 41)
+    fwhm = 3.0
+    r = 6.0
+    x0 = np.array([20.2, 22.4])
+    y0 = np.array([20.1, 20.6])
+    true_flux = np.array([1000.0, 200.0])
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux, _, _ = sep.sum_circle_optimal(data, x0, y0, r, fwhm, subpix=0)
+    flux_grp, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+
+    err = np.abs(flux - true_flux)
+    err_grp = np.abs(flux_grp - true_flux)
+
+    assert_allclose(flux_grp, true_flux, rtol=2.0e-3, atol=1.0e-2)
+    assert err_grp[1] < err[1]
+    assert err_grp.max() < err.max()
+
+
+def test_sum_circle_optimal_grouped_wide_separation():
+    shape = (128, 128)
+    fwhm = 3.0
+    r = 6.0
+    x0 = np.array([20.3, 80.8, 50.5])
+    y0 = np.array([20.7, 75.2, 90.4])
+    true_flux = np.array([1200.0, 800.0, 450.0])
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux, _, _ = sep.sum_circle_optimal(data, x0, y0, r, fwhm, subpix=0)
+    flux_grp, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+
+    assert_allclose(flux, true_flux, rtol=2.0e-3, atol=1.0e-2)
+    assert_allclose(flux_grp, true_flux, rtol=2.0e-3, atol=1.0e-2)
+    assert_allclose(flux_grp, flux, rtol=1.0e-6, atol=1.0e-6)
 
 
 def _sigma_clip_mean(values, sigma=3.0, maxiters=5):

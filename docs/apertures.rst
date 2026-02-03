@@ -1,17 +1,17 @@
 Aperture photometry
 ===================
 
-There are four aperture functions available:
+There are several aperture functions available:
 
 ==================  =========================
 Function                Sums data within...
 ==================  =========================
 `sep.sum_circle`    circle(s)
+`sep.sum_circle_optimal`  circle(s) with Gaussian PSF weighting
 `sep.sum_circann`   circular annulus/annuli
 `sep.sum_ellipse`   ellipse(s)
 `sep.sum_ellipann`  elliptical annulus/annuli
 ==================  =========================
-
 
 The `~sep.stats_circann` function computes statistics in circular annuli,
 including a sigma-clipped mean and robust scatter estimates.
@@ -80,6 +80,32 @@ where the sum is over pixels in the aperture, :math:`\sigma_i` is the
 noise in each pixel, :math:`F` is the sum in the aperture and
 :math:`g` is the gain. The last term is not added if ``gain`` is
 `None`.
+
+**Optimal extraction**
+
+The `~sep.sum_circle_optimal` function performs Gaussian-weighted optimal
+extraction within a circular aperture of radius ``r``. The Gaussian PSF
+is defined by ``fwhm`` and the flux estimate is
+
+.. math::
+
+   F = \frac{\sum_i P_i D_i / V_i}{\sum_i P_i^2 / V_i}
+
+where :math:`P_i` is the Gaussian PSF value (multiplied by the aperture
+overlap fraction), :math:`D_i` is the data value, and :math:`V_i` is the
+variance in each pixel. If no variance is provided, a uniform variance is
+assumed and the estimator reduces to a PSF-weighted sum.
+
+For close pairs of objects, set ``grouped=True`` to auto-group overlapping
+apertures and solve all fluxes in the group simultaneously using the same
+optimal-extraction formalism.
+When ``bkgann`` is provided, the background is estimated using a
+sigma-clipped mean of the annulus values. With ``grouped=True``, a
+group-local background is computed from the members' annuli and applied
+uniformly to the group.
+
+Masked pixels are excluded from the fit. The ``SEP_MASK_IGNORE`` flag
+affects only the reported area, not the flux estimate.
 
 **Masking**
 

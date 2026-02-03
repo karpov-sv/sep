@@ -219,6 +219,86 @@ static double weighted_median_sorted(const valweight *arr, int64_t n, double tot
   return arr[n - 1].v;
 }
 
+static double gaussian_pixel_integral(double dx, double dy, double sigma) {
+  double inv = 1.0 / (sqrt(2.0) * sigma);
+  double ex = erf((dx + 0.5) * inv) - erf((dx - 0.5) * inv);
+  double ey = erf((dy + 0.5) * inv) - erf((dy - 0.5) * inv);
+  return 0.25 * ex * ey;
+}
+
+static int cholesky_decomp(double *a, int n) {
+  int i, j, k;
+
+  for (i = 0; i < n; i++) {
+    for (j = 0; j <= i; j++) {
+      double sum = a[i * n + j];
+      for (k = 0; k < j; k++) {
+        sum -= a[i * n + k] * a[j * n + k];
+      }
+      if (i == j) {
+        if (sum <= 0.0) {
+          return 1;
+        }
+        a[i * n + i] = sqrt(sum);
+      } else {
+        a[i * n + j] = sum / a[j * n + j];
+      }
+    }
+    for (j = i + 1; j < n; j++) {
+      a[i * n + j] = 0.0;
+    }
+  }
+
+  return 0;
+}
+
+static void cholesky_solve(const double *L, const double *b, double *x, int n,
+                           double *work) {
+  int i, k;
+
+  /* forward solve: L * y = b */
+  for (i = 0; i < n; i++) {
+    double sum = b[i];
+    for (k = 0; k < i; k++) {
+      sum -= L[i * n + k] * work[k];
+    }
+    work[i] = sum / L[i * n + i];
+  }
+
+  /* backward solve: L^T * x = y */
+  for (i = n - 1; i >= 0; i--) {
+    double sum = work[i];
+    for (k = i + 1; k < n; k++) {
+      sum -= L[k * n + i] * x[k];
+    }
+    x[i] = sum / L[i * n + i];
+  }
+}
+
+static int uf_find(int *parent, int i) {
+  while (parent[i] != i) {
+    parent[i] = parent[parent[i]];
+    i = parent[i];
+  }
+  return i;
+}
+
+static void uf_union(int *parent, int *rank, int a, int b) {
+  int ra = uf_find(parent, a);
+  int rb = uf_find(parent, b);
+  if (ra == rb) {
+    return;
+  }
+  if (rank[ra] < rank[rb]) {
+    parent[ra] = rb;
+  } else if (rank[ra] > rank[rb]) {
+    parent[rb] = ra;
+  } else {
+    parent[rb] = ra;
+    rank[ra] += 1;
+  }
+}
+
 /*****************************************************************************/
 /* circular aperture */
 
@@ -252,6 +332,805 @@ static double weighted_median_sorted(const valweight *arr, int64_t n, double tot
 #undef APER_COMPARE1
 #undef APER_COMPARE2
 #undef APER_COMPARE3
+
+/*****************************************************************************/
+/* circular aperture with optimal extraction */
+
+int sep_sum_circle_optimal(
+    const sep_image * im,
+    double x,
+    double y,
+    double r,
+    double fwhm,
+    int id,
+    int subpix,
+    short inflag,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+) {
+  PIXTYPE pix, varpix;
+  double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
+  double r2, r_in2, r_out2, sigma, num, den, totarea, maskarea;
+  double psf, var;
+  int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize, ssize;
+  int ismasked, status;
+  short errisarray, errisstd;
+  const BYTE *datat, *errort, *maskt, *segt;
+  converter convert, econvert = NULL, mconvert, sconvert;
+
+  if (r < 0.0 || !(fwhm > 0.0)) {
+    return ILLEGAL_APER_PARAMS;
+  }
+  if (subpix < 0) {
+    return ILLEGAL_SUBPIX;
+  }
+
+  size = esize = msize = ssize = 0;
+  num = den = totarea = maskarea = 0.0;
+  datat = maskt = segt = NULL;
+  errort = im->noise;
+  *flag = 0;
+  varpix = 1.0;
+
+  if (subpix > 0) {
+    scale = 1.0 / subpix;
+    scale2 = scale * scale;
+    offset = 0.5 * (scale - 1.0);
+  } else {
+    scale = 0.0;
+    scale2 = 0.0;
+    offset = 0.0;
+  }
+
+  sigma = fwhm / 2.354820045;
+  if (!(sigma > 0.0)) {
+    return ILLEGAL_APER_PARAMS;
+  }
+
+  r2 = r * r;
+  oversamp_ann_circle(r, &r_in2, &r_out2);
+
+  if ((status = get_converter(im->dtype, &convert, &size))) {
+    return status;
+  }
+  if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize))) {
+    return status;
+  }
+  if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
+    return status;
+  }
+
+  errisarray = 0;
+  errisstd = 0;
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize))) {
+        return status;
+      }
+    } else {
+      varpix = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
+    }
+  }
+
+  boxextent(x, y, r, r, im->w, im->h, &xmin, &xmax, &ymin, &ymax, flag);
+
+  for (iy = ymin; iy < ymax; iy++) {
+    pos = (iy % im->h) * im->w + xmin;
+    datat = MSVC_VOID_CAST im->data + pos * size;
+    if (errisarray) {
+      errort = MSVC_VOID_CAST im->noise + pos * esize;
+    }
+    if (im->mask) {
+      maskt = MSVC_VOID_CAST im->mask + pos * msize;
+    }
+    if (im->segmap) {
+      segt = MSVC_VOID_CAST im->segmap + pos * ssize;
+    }
+
+    for (ix = xmin; ix < xmax; ix++) {
+      dx = ix - x;
+      dy = iy - y;
+      rpix2 = dx * dx + dy * dy;
+      if (rpix2 < r_out2) {
+        if (rpix2 > r_in2) {
+          if (subpix == 0) {
+            overlap = circoverlap(dx - 0.5, dy - 0.5, dx + 0.5, dy + 0.5, r);
+          } else {
+            dx += offset;
+            dy += offset;
+            overlap = 0.0;
+            for (sy = subpix; sy--; dy += scale) {
+              dx1 = dx;
+              dy2 = dy * dy;
+              for (sx = subpix; sx--; dx1 += scale) {
+                if (dx1 * dx1 + dy2 < r2) {
+                  overlap += scale2;
+                }
+              }
+            }
+          }
+        } else {
+          overlap = 1.0;
+        }
+
+        pix = convert(datat);
+        if (errisarray) {
+          varpix = econvert(errort);
+          if (errisstd) {
+            varpix *= varpix;
+          }
+        }
+
+        ismasked = 0;
+        if (im->mask && (mconvert(maskt) > im->maskthresh)) {
+          ismasked = 1;
+        }
+
+        if (im->segmap) {
+          if (id > 0) {
+            if ((sconvert(segt) > 0.) && (sconvert(segt) != id)) {
+              ismasked = 1;
+            }
+          } else {
+            if (sconvert(segt) != -1 * id) {
+              ismasked = 1;
+            }
+          }
+        }
+
+        if (ismasked) {
+          *flag |= SEP_APER_HASMASKED;
+          maskarea += overlap;
+        } else {
+          if (varpix > 0.0) {
+            psf = gaussian_pixel_integral(dx, dy, sigma) * overlap;
+            num += psf * pix / varpix;
+            den += psf * psf / varpix;
+          } else {
+            *flag |= SEP_APER_HASMASKED;
+            maskarea += overlap;
+          }
+        }
+
+        totarea += overlap;
+      }
+
+      datat += size;
+      if (errisarray) {
+        errort += esize;
+      }
+      maskt += msize;
+      segt += ssize;
+    }
+  }
+
+  if (im->mask) {
+    if (totarea > 0.0 && maskarea >= totarea) {
+      *flag |= SEP_APER_ALLMASKED;
+      *sum = 0.0;
+      *sumerr = 0.0;
+      *area = 0.0;
+      return status;
+    } else if (inflag & SEP_MASK_IGNORE) {
+      totarea -= maskarea;
+    }
+  }
+
+  if (den <= 0.0) {
+    *flag |= SEP_APER_ALLMASKED;
+    *sum = 0.0;
+    *sumerr = 0.0;
+    *area = 0.0;
+    return status;
+  }
+
+  *sum = num / den;
+  var = 1.0 / den;
+  if (im->gain > 0.0 && *sum > 0.0) {
+    var += (*sum) / im->gain;
+  }
+  *sumerr = sqrt(var);
+  *area = totarea;
+
+  return status;
+}
+
+/*****************************************************************************/
+/* circular aperture optimal extraction with auto-grouping */
+
+static int sep_sum_circle_optimal_multi_impl(
+    const sep_image * im,
+    const double * x,
+    const double * y,
+    const double * r,
+    const double * fwhm,
+    int64_t n,
+    const int * id,
+    int subpix,
+    short inflag,
+    const double * bkg_mean,
+    const double * bkg_mean_err,
+    const double * bkg_weight,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+) {
+  PIXTYPE pix, varpix;
+  double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
+  double tmp, var, dist2, rsum, sigma;
+  int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos;
+  int64_t size, esize, msize, ssize;
+  int i, j, g, gi;
+  int status, ismasked;
+  short errisarray, errisstd;
+  const BYTE *datat, *errort, *maskt, *segt;
+  converter convert, econvert = NULL, mconvert, sconvert;
+  int *parent, *rank, *group_id, *root_map, *group_counts, *group_offsets, *group_fill;
+  int *members;
+  double *r2, *r_in2, *r_out2, *sigma_arr;
+  double *M, *b, *work, *sol, *totarea, *maskarea, *ai;
+  int use_bkg;
+
+  if (n < 1) {
+    return ILLEGAL_APER_PARAMS;
+  }
+  if (subpix < 0) {
+    return ILLEGAL_SUBPIX;
+  }
+
+  size = esize = msize = ssize = 0;
+  datat = maskt = segt = NULL;
+  errort = im->noise;
+  errisarray = 0;
+  errisstd = 0;
+  use_bkg = (bkg_mean != NULL);
+
+  if ((status = get_converter(im->dtype, &convert, &size))) {
+    return status;
+  }
+  if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize))) {
+    return status;
+  }
+  if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
+    return status;
+  }
+
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize))) {
+        return status;
+      }
+    }
+  }
+
+  parent = (int *)malloc((size_t)n * sizeof(int));
+  rank = (int *)calloc((size_t)n, sizeof(int));
+  group_id = (int *)malloc((size_t)n * sizeof(int));
+  root_map = (int *)malloc((size_t)n * sizeof(int));
+  group_counts = (int *)calloc((size_t)n, sizeof(int));
+  group_offsets = (int *)malloc((size_t)(n + 1) * sizeof(int));
+  group_fill = (int *)malloc((size_t)n * sizeof(int));
+  members = (int *)malloc((size_t)n * sizeof(int));
+  r2 = (double *)malloc((size_t)n * sizeof(double));
+  r_in2 = (double *)malloc((size_t)n * sizeof(double));
+  r_out2 = (double *)malloc((size_t)n * sizeof(double));
+  sigma_arr = (double *)malloc((size_t)n * sizeof(double));
+
+  if (!parent || !rank || !group_id || !root_map || !group_counts || !group_offsets
+      || !group_fill || !members || !r2 || !r_in2 || !r_out2 || !sigma_arr)
+  {
+    status = MEMORY_ALLOC_ERROR;
+    goto cleanup;
+  }
+
+  for (i = 0; i < n; i++) {
+    parent[i] = i;
+    if (r[i] < 0.0 || !(fwhm[i] > 0.0)) {
+      status = ILLEGAL_APER_PARAMS;
+      goto cleanup;
+    }
+    r2[i] = r[i] * r[i];
+    oversamp_ann_circle(r[i], &r_in2[i], &r_out2[i]);
+    sigma = fwhm[i] / 2.354820045;
+    sigma_arr[i] = sigma;
+    if (!(sigma_arr[i] > 0.0)) {
+      status = ILLEGAL_APER_PARAMS;
+      goto cleanup;
+    }
+    flag[i] = 0;
+    sum[i] = 0.0;
+    sumerr[i] = 0.0;
+    area[i] = 0.0;
+  }
+
+  for (i = 0; i < n; i++) {
+    for (j = i + 1; j < n; j++) {
+      dx = x[i] - x[j];
+      dy = y[i] - y[j];
+      rsum = r[i] + r[j];
+      dist2 = dx * dx + dy * dy;
+      if (dist2 <= rsum * rsum) {
+        uf_union(parent, rank, i, j);
+      }
+    }
+  }
+
+  for (i = 0; i < n; i++) {
+    root_map[i] = -1;
+  }
+  g = 0;
+  for (i = 0; i < n; i++) {
+    int root = uf_find(parent, i);
+    if (root_map[root] < 0) {
+      root_map[root] = g++;
+    }
+    group_id[i] = root_map[root];
+    group_counts[group_id[i]] += 1;
+  }
+
+  group_offsets[0] = 0;
+  for (i = 0; i < g; i++) {
+    group_offsets[i + 1] = group_offsets[i] + group_counts[i];
+    group_fill[i] = group_offsets[i];
+  }
+  for (i = 0; i < n; i++) {
+    int gid = group_id[i];
+    members[group_fill[gid]++] = i;
+  }
+
+  if (subpix > 0) {
+    scale = 1.0 / subpix;
+    scale2 = scale * scale;
+    offset = 0.5 * (scale - 1.0);
+  } else {
+    scale = 0.0;
+    scale2 = 0.0;
+    offset = 0.0;
+  }
+
+  for (gi = 0; gi < g; gi++) {
+    int gcount = group_counts[gi];
+    int *gidx = members + group_offsets[gi];
+    double group_mean = 0.0;
+    double group_err = 0.0;
+    int has_pos = 0;
+    int has_neg = 0;
+    int n_pos = 0;
+    int n_neg = 0;
+    int *pos_ids = NULL;
+    int *neg_ids = NULL;
+
+    if (use_bkg) {
+      double wsum = 0.0;
+      double werr2 = 0.0;
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        double w = bkg_weight ? bkg_weight[idx] : 1.0;
+        if (!(w > 0.0)) {
+          continue;
+        }
+        if (!(bkg_mean[idx] == bkg_mean[idx])) {
+          continue;
+        }
+        wsum += w;
+        group_mean += w * bkg_mean[idx];
+        if (bkg_mean_err) {
+          double err = bkg_mean_err[idx];
+          if (err > 0.0) {
+            double we = w * err;
+            werr2 += we * we;
+          }
+        }
+      }
+
+      if (!(wsum > 0.0)) {
+        put_errdetail("group background annulus has no valid pixels");
+        status = ILLEGAL_APER_PARAMS;
+        goto cleanup;
+      }
+
+      group_mean /= wsum;
+      if (bkg_mean_err) {
+        group_err = sqrt(werr2) / wsum;
+      }
+    }
+
+    if (gcount == 1) {
+      int idx = gidx[0];
+      status = sep_sum_circle_optimal(
+          im, x[idx], y[idx], r[idx], fwhm[idx], id ? id[idx] : 0, subpix, inflag,
+          &sum[idx], &sumerr[idx], &area[idx], &flag[idx]
+      );
+      if (status != RETURN_OK) {
+        goto cleanup;
+      }
+      if (use_bkg && area[idx] > 0.0) {
+        double berr;
+        sum[idx] -= group_mean * area[idx];
+        if (group_err > 0.0) {
+          berr = group_err * area[idx];
+          sumerr[idx] = sqrt(sumerr[idx] * sumerr[idx] + berr * berr);
+        }
+      }
+      continue;
+    }
+
+    xmin = im->w;
+    xmax = 0;
+    ymin = im->h;
+    ymax = 0;
+
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      int64_t lxmin, lxmax, lymin, lymax;
+      short lflag = 0;
+      boxextent(x[idx], y[idx], r[idx], r[idx], im->w, im->h, &lxmin, &lxmax, &lymin,
+                &lymax, &lflag);
+      flag[idx] |= lflag;
+      if (lxmin < xmin) {
+        xmin = lxmin;
+      }
+      if (lxmax > xmax) {
+        xmax = lxmax;
+      }
+      if (lymin < ymin) {
+        ymin = lymin;
+      }
+      if (lymax > ymax) {
+        ymax = lymax;
+      }
+    }
+
+    M = (double *)calloc((size_t)(gcount * gcount), sizeof(double));
+    b = (double *)calloc((size_t)gcount, sizeof(double));
+    work = (double *)malloc((size_t)gcount * sizeof(double));
+    sol = (double *)malloc((size_t)gcount * sizeof(double));
+    totarea = (double *)calloc((size_t)gcount, sizeof(double));
+    maskarea = (double *)calloc((size_t)gcount, sizeof(double));
+    ai = (double *)malloc((size_t)gcount * sizeof(double));
+
+    if (!M || !b || !work || !sol || !totarea || !maskarea || !ai) {
+      status = MEMORY_ALLOC_ERROR;
+      free(M);
+      free(b);
+      free(work);
+      free(sol);
+      free(totarea);
+      free(maskarea);
+      free(ai);
+      goto cleanup;
+    }
+
+    if (im->segmap && id) {
+      pos_ids = (int *)malloc((size_t)gcount * sizeof(int));
+      neg_ids = (int *)malloc((size_t)gcount * sizeof(int));
+      if (!pos_ids || !neg_ids) {
+        status = MEMORY_ALLOC_ERROR;
+        free(M);
+        free(b);
+        free(work);
+        free(sol);
+        free(totarea);
+        free(maskarea);
+        free(ai);
+        free(pos_ids);
+        free(neg_ids);
+        goto cleanup;
+      }
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        if (id[idx] > 0) {
+          has_pos = 1;
+          pos_ids[n_pos++] = id[idx];
+        } else if (id[idx] < 0) {
+          has_neg = 1;
+          neg_ids[n_neg++] = -id[idx];
+        }
+      }
+    }
+
+    for (iy = ymin; iy < ymax; iy++) {
+      pos = (iy % im->h) * im->w + xmin;
+      datat = MSVC_VOID_CAST im->data + pos * size;
+      if (errisarray) {
+        errort = MSVC_VOID_CAST im->noise + pos * esize;
+      }
+      if (im->mask) {
+        maskt = MSVC_VOID_CAST im->mask + pos * msize;
+      }
+      if (im->segmap) {
+        segt = MSVC_VOID_CAST im->segmap + pos * ssize;
+      }
+
+      for (ix = xmin; ix < xmax; ix++) {
+        ismasked = 0;
+        if (im->mask && (mconvert(maskt) > im->maskthresh)) {
+          ismasked = 1;
+        }
+
+        if (im->segmap) {
+          int seg_masked = 0;
+          double segval = sconvert(segt);
+          if (has_pos) {
+            if (segval > 0.0) {
+              seg_masked = 1;
+              for (i = 0; i < n_pos; i++) {
+                if (segval == pos_ids[i]) {
+                  seg_masked = 0;
+                  break;
+                }
+              }
+            }
+          } else if (has_neg) {
+            seg_masked = 1;
+            for (i = 0; i < n_neg; i++) {
+              if (segval == neg_ids[i]) {
+                seg_masked = 0;
+                break;
+              }
+            }
+          }
+          if (seg_masked) {
+            ismasked = 1;
+          }
+        }
+
+        pix = convert(datat);
+        if (errisarray) {
+          varpix = econvert(errort);
+          if (errisstd) {
+            varpix *= varpix;
+          }
+        } else if (im->noise_type != SEP_NOISE_NONE) {
+          varpix = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
+        } else {
+          varpix = 1.0;
+        }
+
+        if (varpix <= 0.0) {
+          ismasked = 1;
+        }
+
+        for (i = 0; i < gcount; i++) {
+          int idx = gidx[i];
+          dx = ix - x[idx];
+          dy = iy - y[idx];
+          rpix2 = dx * dx + dy * dy;
+          overlap = 0.0;
+          if (rpix2 < r_out2[idx]) {
+            if (rpix2 > r_in2[idx]) {
+              if (subpix == 0) {
+                overlap =
+                    circoverlap(dx - 0.5, dy - 0.5, dx + 0.5, dy + 0.5, r[idx]);
+              } else {
+                dx += offset;
+                dy += offset;
+                overlap = 0.0;
+                for (sy = subpix; sy--; dy += scale) {
+                  dx1 = dx;
+                  dy2 = dy * dy;
+                  for (sx = subpix; sx--; dx1 += scale) {
+                    if (dx1 * dx1 + dy2 < r2[idx]) {
+                      overlap += scale2;
+                    }
+                  }
+                }
+              }
+            } else {
+              overlap = 1.0;
+            }
+          }
+
+          ai[i] = 0.0;
+          if (overlap > 0.0) {
+            totarea[i] += overlap;
+            if (ismasked) {
+              flag[idx] |= SEP_APER_HASMASKED;
+              maskarea[i] += overlap;
+            } else {
+              ai[i] = overlap * gaussian_pixel_integral(dx, dy, sigma_arr[idx]);
+            }
+          }
+        }
+
+        if (!ismasked) {
+          double w = 1.0 / varpix;
+          for (i = 0; i < gcount; i++) {
+            if (ai[i] <= 0.0) {
+              continue;
+            }
+            b[i] += w * ai[i] * pix;
+            for (j = 0; j <= i; j++) {
+              if (ai[j] > 0.0) {
+                M[i * gcount + j] += w * ai[i] * ai[j];
+              }
+            }
+          }
+        }
+
+        datat += size;
+        if (errisarray) {
+          errort += esize;
+        }
+        maskt += msize;
+        segt += ssize;
+      }
+    }
+
+    for (i = 0; i < gcount; i++) {
+      for (j = 0; j < i; j++) {
+        M[j * gcount + i] = M[i * gcount + j];
+      }
+    }
+
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      if (im->mask) {
+        if (totarea[i] > 0.0 && maskarea[i] >= totarea[i]) {
+          flag[idx] |= SEP_APER_ALLMASKED;
+          area[idx] = 0.0;
+        } else if (inflag & SEP_MASK_IGNORE) {
+          area[idx] = totarea[i] - maskarea[i];
+        } else {
+          area[idx] = totarea[i];
+        }
+      } else {
+        area[idx] = totarea[i];
+      }
+    }
+
+    tmp = 0.0;
+    for (i = 0; i < gcount; i++) {
+      tmp += M[i * gcount + i];
+    }
+    if (!(tmp > 0.0) || cholesky_decomp(M, gcount)) {
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        status = sep_sum_circle_optimal(
+            im,
+            x[idx],
+            y[idx],
+            r[idx],
+            fwhm[idx],
+            id ? id[idx] : 0,
+            subpix,
+            inflag,
+            &sum[idx],
+            &sumerr[idx],
+            &area[idx],
+            &flag[idx]
+        );
+        if (status != RETURN_OK) {
+          free(M);
+          free(b);
+          free(work);
+          free(sol);
+          free(totarea);
+          free(maskarea);
+          free(ai);
+          goto cleanup;
+        }
+      }
+    } else {
+      cholesky_solve(M, b, sol, gcount, work);
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        sum[idx] = sol[i];
+      }
+
+      for (i = 0; i < gcount; i++) {
+        memset(work, 0, (size_t)gcount * sizeof(double));
+        work[i] = 1.0;
+        cholesky_solve(M, work, sol, gcount, b);
+        var = sol[i];
+        if (var < 0.0) {
+          var = 0.0;
+        }
+        if (im->gain > 0.0 && sum[gidx[i]] > 0.0) {
+          var += sum[gidx[i]] / im->gain;
+        }
+        sumerr[gidx[i]] = sqrt(var);
+      }
+    }
+
+    if (use_bkg) {
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        if (area[idx] > 0.0) {
+          double berr;
+          sum[idx] -= group_mean * area[idx];
+          if (group_err > 0.0) {
+            berr = group_err * area[idx];
+            sumerr[idx] = sqrt(sumerr[idx] * sumerr[idx] + berr * berr);
+          }
+        }
+      }
+    }
+
+    free(M);
+    free(b);
+    free(work);
+    free(sol);
+    free(totarea);
+    free(maskarea);
+    free(ai);
+    free(pos_ids);
+    free(neg_ids);
+  }
+
+  status = RETURN_OK;
+
+cleanup:
+  free(parent);
+  free(rank);
+  free(group_id);
+  free(root_map);
+  free(group_counts);
+  free(group_offsets);
+  free(group_fill);
+  free(members);
+  free(r2);
+  free(r_in2);
+  free(r_out2);
+  free(sigma_arr);
+
+  return status;
+}
+
+/*****************************************************************************/
+/* circular aperture optimal extraction with auto-grouping */
+
+int sep_sum_circle_optimal_multi(
+    const sep_image * im,
+    const double * x,
+    const double * y,
+    const double * r,
+    const double * fwhm,
+    int64_t n,
+    const int * id,
+    int subpix,
+    short inflag,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+) {
+  return sep_sum_circle_optimal_multi_impl(
+      im, x, y, r, fwhm, n, id, subpix, inflag,
+      NULL, NULL, NULL, sum, sumerr, area, flag
+  );
+}
+
+int sep_sum_circle_optimal_multi_bkg(
+    const sep_image * im,
+    const double * x,
+    const double * y,
+    const double * r,
+    const double * fwhm,
+    int64_t n,
+    const int * id,
+    int subpix,
+    short inflag,
+    const double * bkg_mean,
+    const double * bkg_mean_err,
+    const double * bkg_weight,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+) {
+  return sep_sum_circle_optimal_multi_impl(
+      im, x, y, r, fwhm, n, id, subpix, inflag,
+      bkg_mean, bkg_mean_err, bkg_weight, sum, sumerr, area, flag
+  );
+}
 
 /*****************************************************************************/
 /* elliptical aperture */

@@ -295,6 +295,71 @@ SEP_API int sep_sum_circle(
     short * flag
 ); /* OUTPUT: flags */
 
+/* Optimal extraction within a circular aperture using a Gaussian PSF.
+ *
+ * The FWHM sets the Gaussian sigma for PSF weighting. The output sum is the
+ * optimal-extraction flux estimate, and sumerr is its uncertainty.
+ */
+SEP_API int sep_sum_circle_optimal(
+    const sep_image * image,
+    double x,
+    double y,
+    double r,
+    double fwhm,
+    int id,
+    int subpix,
+    short inflags,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+);
+
+/* Optimal extraction for multiple circular apertures with auto-grouping.
+ *
+ * Objects whose apertures overlap are solved simultaneously.
+ */
+SEP_API int sep_sum_circle_optimal_multi(
+    const sep_image * image,
+    const double * x,
+    const double * y,
+    const double * r,
+    const double * fwhm,
+    int64_t n,
+    const int * id,
+    int subpix,
+    short inflags,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+);
+
+/* Optimal extraction for multiple circular apertures with auto-grouping and
+ * group-local background subtraction.
+ *
+ * The background mean and its error are provided per object and combined
+ * per group using weights.
+ */
+SEP_API int sep_sum_circle_optimal_multi_bkg(
+    const sep_image * image,
+    const double * x,
+    const double * y,
+    const double * r,
+    const double * fwhm,
+    int64_t n,
+    const int * id,
+    int subpix,
+    short inflags,
+    const double * bkg_mean,
+    const double * bkg_mean_err,
+    const double * bkg_weight,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+);
+
 
 SEP_API int sep_sum_circann(
     const sep_image * image,

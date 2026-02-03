@@ -165,6 +165,28 @@ cdef extern from "sep.h":
                        int id, int subpix, short inflags,
                        double *sum, double *sumerr, double *area, short *flag)
 
+    int sep_sum_circle_optimal(const sep_image *image,
+                               double x, double y, double r, double fwhm,
+                               int id, int subpix, short inflags,
+                               double *sum, double *sumerr, double *area,
+                               short *flag)
+
+    int sep_sum_circle_optimal_multi(const sep_image *image,
+                                     double *x, double *y, double *r,
+                                     double *fwhm, np.int64_t n,
+                                     int *id, int subpix, short inflags,
+                                     double *sum, double *sumerr, double *area,
+                                     short *flag)
+
+    int sep_sum_circle_optimal_multi_bkg(const sep_image *image,
+                                         double *x, double *y, double *r,
+                                         double *fwhm, np.int64_t n,
+                                         int *id, int subpix, short inflags,
+                                         double *bkg_mean, double *bkg_mean_err,
+                                         double *bkg_weight,
+                                         double *sum, double *sumerr,
+                                         double *area, short *flag)
+
     int sep_sum_circann(const sep_image *image,
                         double x, double y, double rin, double rout,
                         int id, int subpix, short inflags,
@@ -994,7 +1016,7 @@ def sum_circle(np.ndarray data not None, x, y, r,
 
     """
 
-    cdef double flux1, fluxerr1, area1,
+    cdef double flux1, fluxerr1, area1
     cdef double bkgflux, bkgfluxerr, bkgarea
     cdef short flag1, bkgflag
     cdef int status
@@ -1117,6 +1139,304 @@ def sum_circle(np.ndarray data not None, x, y, r,
             np.PyArray_MultiIter_NEXT(it)
 
         return sum, sumerr, flag
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
+                       var=None, err=None, gain=None, np.ndarray mask=None,
+                       double maskthresh=0.0,
+                       seg_id=None, np.ndarray segmap=None,
+                       bkgann=None, bint grouped=False, int subpix=5):
+    """sum_circle_optimal(data, x, y, r, fwhm, err=None, var=None,
+                           mask=None, maskthresh=0.0,
+                           segmap=None, seg_id=None,
+                           bkgann=None, gain=None,
+                           grouped=False, subpix=5)
+
+    Optimal extraction in circular aperture(s) using a Gaussian PSF.
+
+    Parameters are identical to `~sep.sum_circle`, with the addition of
+    ``fwhm`` which sets the Gaussian PSF width used for weighting.
+    ``bkgann`` may be supplied to subtract a local background annulus using
+    a sigma-clipped mean. Set ``grouped=True`` to auto-group overlapping
+    apertures and solve all fluxes in each group simultaneously; in this
+    case the background is estimated per group from the members' annuli.
+    """
+
+    cdef double flux1, fluxerr1, area1
+    cdef double bkgfluxerr, bkgarea
+    cdef double mean, std, med, mad_std, mean_clip
+    cdef double clip_sigma = 3.0
+    cdef int clip_iters = 5
+    cdef short flag1, bkgflag
+    cdef int status
+    cdef np.broadcast it
+    cdef sep_image im
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] x1, y1, r1, fwhm1
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] rin1, rout1
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] sum1, sumerr1, area_arr
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] bkg_mean_arr
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] bkg_mean_err_arr
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] bkg_weight_arr
+    cdef np.ndarray[np.int32_t, ndim=1, mode="c"] seg_id1
+    cdef np.ndarray[np.int16_t, ndim=1, mode="c"] flag_arr
+    cdef Py_ssize_t n
+    cdef Py_ssize_t i
+
+    if (segmap is not None) and (seg_id is None):
+        raise ValueError('`segmap` supplied but not `seg_id`.')
+
+    _parse_arrays(data, err, var, mask, segmap, &im)
+    im.maskthresh = maskthresh
+    if gain is not None:
+        im.gain = gain
+
+    dt = np.dtype(np.double)
+    dint = np.dtype(np.int32)
+
+    x = np.require(x, dtype=dt)
+    y = np.require(y, dtype=dt)
+    r = np.require(r, dtype=dt)
+    fwhm = np.require(fwhm, dtype=dt)
+
+    if seg_id is not None:
+        seg_id = np.require(seg_id, dtype=dint)
+        if seg_id.shape != x.shape:
+            raise ValueError('Shapes of `x` and `seg_id` do not match')
+    else:
+        seg_id = np.zeros(len(x), dtype=dint)
+
+    if grouped:
+        if bkgann is None:
+            shape = np.broadcast(x, y, r, fwhm).shape
+            x1 = np.ascontiguousarray(np.broadcast_to(x, shape).ravel(),
+                                      dtype=np.float64)
+            y1 = np.ascontiguousarray(np.broadcast_to(y, shape).ravel(),
+                                      dtype=np.float64)
+            r1 = np.ascontiguousarray(np.broadcast_to(r, shape).ravel(),
+                                      dtype=np.float64)
+            fwhm1 = np.ascontiguousarray(np.broadcast_to(fwhm, shape).ravel(),
+                                         dtype=np.float64)
+
+            if seg_id is not None:
+                if seg_id.shape != shape:
+                    seg_id = np.broadcast_to(seg_id, shape)
+                seg_id1 = np.ascontiguousarray(seg_id.ravel(), dtype=np.int32)
+            else:
+                seg_id1 = np.zeros(x1.shape[0], dtype=np.int32)
+
+            n = x1.shape[0]
+            sum1 = np.empty(n, dtype=np.float64)
+            sumerr1 = np.empty(n, dtype=np.float64)
+            area_arr = np.empty(n, dtype=np.float64)
+            flag_arr = np.empty(n, dtype=np.int16)
+
+            status = sep_sum_circle_optimal_multi(
+                &im,
+                <double*>x1.data,
+                <double*>y1.data,
+                <double*>r1.data,
+                <double*>fwhm1.data,
+                n,
+                <int*>seg_id1.data,
+                subpix,
+                0,
+                <double*>sum1.data,
+                <double*>sumerr1.data,
+                <double*>area_arr.data,
+                <short*>flag_arr.data
+            )
+            _assert_ok(status)
+
+            return (sum1.reshape(shape),
+                    sumerr1.reshape(shape),
+                    flag_arr.reshape(shape))
+
+        rin, rout = bkgann
+        rin = np.require(rin, dtype=dt)
+        rout = np.require(rout, dtype=dt)
+
+        shape = np.broadcast(x, y, r, fwhm, rin, rout).shape
+        x1 = np.ascontiguousarray(np.broadcast_to(x, shape).ravel(),
+                                  dtype=np.float64)
+        y1 = np.ascontiguousarray(np.broadcast_to(y, shape).ravel(),
+                                  dtype=np.float64)
+        r1 = np.ascontiguousarray(np.broadcast_to(r, shape).ravel(),
+                                  dtype=np.float64)
+        fwhm1 = np.ascontiguousarray(np.broadcast_to(fwhm, shape).ravel(),
+                                     dtype=np.float64)
+        rin1 = np.ascontiguousarray(np.broadcast_to(rin, shape).ravel(),
+                                    dtype=np.float64)
+        rout1 = np.ascontiguousarray(np.broadcast_to(rout, shape).ravel(),
+                                     dtype=np.float64)
+
+        if seg_id is not None:
+            if seg_id.shape != shape:
+                seg_id = np.broadcast_to(seg_id, shape)
+            seg_id1 = np.ascontiguousarray(seg_id.ravel(), dtype=np.int32)
+        else:
+            seg_id1 = np.zeros(x1.shape[0], dtype=np.int32)
+
+        n = x1.shape[0]
+        sum1 = np.empty(n, dtype=np.float64)
+        sumerr1 = np.empty(n, dtype=np.float64)
+        area_arr = np.empty(n, dtype=np.float64)
+        flag_arr = np.empty(n, dtype=np.int16)
+        bkg_mean_arr = np.empty(n, dtype=np.float64)
+        bkg_mean_err_arr = np.empty(n, dtype=np.float64)
+        bkg_weight_arr = np.empty(n, dtype=np.float64)
+
+        for i in range(n):
+            status = sep_stats_circann(
+                &im,
+                (<double*>x1.data)[i],
+                (<double*>y1.data)[i],
+                (<double*>rin1.data)[i],
+                (<double*>rout1.data)[i],
+                (<int*>seg_id1.data)[i],
+                1,
+                SEP_MASK_IGNORE,
+                clip_sigma,
+                clip_iters,
+                &mean,
+                &std,
+                &med,
+                &mad_std,
+                &mean_clip,
+                &bkgarea,
+                &bkgfluxerr,
+                &bkgflag
+            )
+            _assert_ok(status)
+
+            if not bkgarea > 0 or mean_clip != mean_clip:
+                raise ValueError(
+                    "The background annulus does not contain any valid pixels, "
+                    "for the object at index "
+                    f"{i}."
+                )
+
+            bkg_mean_arr[i] = mean_clip
+            bkg_weight_arr[i] = bkgarea
+            bkg_mean_err_arr[i] = bkgfluxerr / bkgarea
+
+        status = sep_sum_circle_optimal_multi_bkg(
+            &im,
+            <double*>x1.data,
+            <double*>y1.data,
+            <double*>r1.data,
+            <double*>fwhm1.data,
+            n,
+            <int*>seg_id1.data,
+            subpix,
+            0,
+            <double*>bkg_mean_arr.data,
+            <double*>bkg_mean_err_arr.data,
+            <double*>bkg_weight_arr.data,
+            <double*>sum1.data,
+            <double*>sumerr1.data,
+            <double*>area_arr.data,
+            <short*>flag_arr.data
+        )
+        _assert_ok(status)
+
+        return (sum1.reshape(shape),
+                sumerr1.reshape(shape),
+                flag_arr.reshape(shape))
+
+    if bkgann is None:
+        shape = np.broadcast(x, y, r, fwhm).shape
+        sum = np.empty(shape, dt)
+        sumerr = np.empty(shape, dt)
+        flag = np.empty(shape, np.short)
+
+        it = np.broadcast(x, y, r, fwhm, seg_id, sum, sumerr, flag)
+
+        while np.PyArray_MultiIter_NOTDONE(it):
+            status = sep_sum_circle_optimal(
+                &im,
+                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                (<int*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                subpix, 0,
+                <double*>np.PyArray_MultiIter_DATA(it, 5),
+                <double*>np.PyArray_MultiIter_DATA(it, 6),
+                &area1,
+                <short*>np.PyArray_MultiIter_DATA(it, 7))
+            _assert_ok(status)
+
+            np.PyArray_MultiIter_NEXT(it)
+
+        return sum, sumerr, flag
+
+    else:
+        rin, rout = bkgann
+
+        rin = np.require(rin, dtype=dt)
+        rout = np.require(rout, dtype=dt)
+
+        shape = np.broadcast(x, y, r, fwhm, rin, rout).shape
+        sum = np.empty(shape, dt)
+        sumerr = np.empty(shape, dt)
+        flag = np.empty(shape, np.short)
+
+        it = np.broadcast(x, y, r, fwhm, rin, rout, seg_id, sum, sumerr, flag)
+        while np.PyArray_MultiIter_NOTDONE(it):
+            status = sep_sum_circle_optimal(
+                &im,
+                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                subpix, 0, &flux1, &fluxerr1, &area1, &flag1)
+            _assert_ok(status)
+
+            status = sep_stats_circann(
+                &im,
+                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 5))[0],
+                (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                1,
+                SEP_MASK_IGNORE,
+                clip_sigma,
+                clip_iters,
+                &mean,
+                &std,
+                &med,
+                &mad_std,
+                &mean_clip,
+                &bkgarea,
+                &bkgfluxerr,
+                &bkgflag
+            )
+            _assert_ok(status)
+
+            if not bkgarea > 0 or mean_clip != mean_clip:
+                raise ValueError(
+                    "The background annulus does not contain any valid pixels, "
+                    "for the object at index "
+                    f"{np.PyArray_MultiIter_INDEX(it)}."
+                )
+
+            if area1 > 0:
+                flux1 -= mean_clip * area1
+                bkgfluxerr = bkgfluxerr / bkgarea * area1
+                fluxerr1 = sqrt(fluxerr1*fluxerr1 + bkgfluxerr*bkgfluxerr)
+            (<double*>np.PyArray_MultiIter_DATA(it, 7))[0] = flux1
+            (<double*>np.PyArray_MultiIter_DATA(it, 8))[0] = fluxerr1
+            (<short*>np.PyArray_MultiIter_DATA(it, 9))[0] = flag1
+
+            np.PyArray_MultiIter_NEXT(it)
+
+        return sum, sumerr, flag
+
+
 
 @cython.boundscheck(False)
 @cython.wraparound(False)

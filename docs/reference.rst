@@ -16,6 +16,7 @@ Reference/API
    :toctree: api
 
    sep.sum_circle
+   sep.sum_circle_optimal
    sep.sum_circann
    sep.stats_circann
    sep.sum_ellipse

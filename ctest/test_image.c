@@ -322,6 +322,25 @@ int main(int argc, char ** argv) {
       (double)(t1 - t0) / 1000. / catalog->nobj
   );
 
+  if (catalog->nobj > 0) {
+    double optflux, optfluxerr, optarea;
+    short optflag;
+    sep_sum_circle_optimal(
+        &im,
+        catalog->x[0],
+        catalog->y[0],
+        5.0,
+        3.0,
+        0,
+        5,
+        0,
+        &optflux,
+        &optfluxerr,
+        &optarea,
+        &optflag
+    );
+  }
+
   /* print results */
   printf("writing to file: %s\n", fname2);
   catout = fopen(fname2, "w+");
