@@ -333,6 +333,8 @@ SEP_API int sep_stats_circann(
     double * median,
     double * mad_std,
     double * mean_clip,
+    double * area,
+    double * sumerr,
     short * flag
 );
 
