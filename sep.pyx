@@ -170,7 +170,8 @@ cdef extern from "sep.h":
                           int id, int subpix, short inflags,
                           double clip_sigma, int clip_iters,
                           double *mean, double *std, double *median,
-                          double *mad_std, double *mean_clip, short *flag)
+                          double *mad_std, double *mean_clip,
+                          double *area, double *sumerr, short *flag)
 
     int sep_sum_ellipse(const sep_image *image,
                         double x, double y, double a, double b, double theta,
@@ -1311,6 +1312,7 @@ def stats_circann(np.ndarray data not None, x, y, rin, rout,
     """
 
     cdef int status
+    cdef double area1, sumerr1
     cdef np.broadcast it
     cdef sep_image im
 
@@ -1366,6 +1368,8 @@ def stats_circann(np.ndarray data not None, x, y, rin, rout,
             <double*>np.PyArray_MultiIter_DATA(it, 7),
             <double*>np.PyArray_MultiIter_DATA(it, 8),
             <double*>np.PyArray_MultiIter_DATA(it, 9),
+            &area1,
+            &sumerr1,
             <short*>np.PyArray_MultiIter_DATA(it, 10))
 
         _assert_ok(status)

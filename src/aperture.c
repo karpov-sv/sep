@@ -346,19 +346,23 @@ int sep_stats_circann(
     double * median,
     double * mad_std,
     double * mean_clip,
+    double * area,
+    double * sumerr,
     short * flag
 ) {
   PIXTYPE pix;
   double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
   double rin2, rin_in2, rin_out2, rout2, rout_in2, rout_out2;
   double totw, sumw, varw, diff, wsum, vsum;
+  double tv, sigtv, varpix, varpix_const;
   double med, madv, sig, totw_keep;
   double lo, hi;
   int64_t ix, iy, i, xmin, xmax, ymin, ymax, sx, sy, pos, size, msize, ssize, nkeep;
-  int64_t nvals, cap;
+  int64_t nvals, cap, esize;
   int status, ismasked, changed, iter;
-  const BYTE *datat, *maskt, *segt;
-  converter convert, mconvert, sconvert;
+  short errisarray, errisstd;
+  const BYTE *datat, *errort, *maskt, *segt;
+  converter convert, econvert = NULL, mconvert, sconvert;
   valweight *vw = NULL;
   valweight *tmp = NULL;
   char *keep = NULL;
@@ -383,6 +387,8 @@ int sep_stats_circann(
   *median = NAN;
   *mad_std = NAN;
   *mean_clip = NAN;
+  *area = 0.0;
+  *sumerr = 0.0;
 
   rin2 = rin * rin;
   rout2 = rout * rout;
@@ -403,6 +409,11 @@ int sep_stats_circann(
   segt = NULL;
   msize = 0;
   ssize = 0;
+  errort = im->noise;
+  esize = 0;
+  errisarray = 0;
+  errisstd = 0;
+  varpix_const = 0.0;
 
   /* get data converter(s) for input array(s) */
   if ((status = get_converter(im->dtype, &convert, &size))) {
@@ -429,12 +440,17 @@ int sep_stats_circann(
 
   nvals = 0;
   totw = 0.0;
+  tv = 0.0;
+  sigtv = 0.0;
 
   /* loop over rows in the box */
   for (iy = ymin; iy < ymax; iy++) {
     /* set pointers to the start of this row */
     pos = (iy % im->h) * im->w + xmin;
     datat = MSVC_VOID_CAST im->data + pos * size;
+    if (errisarray) {
+      errort = MSVC_VOID_CAST im->noise + pos * esize;
+    }
     if (im->mask) {
       maskt = MSVC_VOID_CAST im->mask + pos * msize;
     }
@@ -506,6 +522,16 @@ int sep_stats_circann(
             vw[nvals].v = pix;
             vw[nvals].w = overlap;
             totw += overlap;
+            tv += pix * overlap;
+            if (errisarray) {
+              varpix = econvert(errort);
+              if (errisstd) {
+                varpix *= varpix;
+              }
+            } else {
+              varpix = varpix_const;
+            }
+            sigtv += varpix * overlap;
             nvals++;
           }
         }
@@ -513,6 +539,9 @@ int sep_stats_circann(
 
       /* increment pointers by one element */
       datat += size;
+      if (errisarray) {
+        errort += esize;
+      }
       maskt += msize;
       segt += ssize;
     }
@@ -610,6 +639,15 @@ int sep_stats_circann(
   qsort(vw, (size_t)nvals, sizeof(valweight), cmp_valweight);
   madv = weighted_median_sorted(vw, nvals, totw);
   *mad_std = madv * mad_scale;
+
+  if (im->gain > 0.0 && tv > 0.0) {
+    sigtv += tv / im->gain;
+  }
+  if (sigtv < 0.0) {
+    sigtv = 0.0;
+  }
+  *sumerr = sqrt(sigtv);
+  *area = totw;
 
 exit:
   if (keep) {
