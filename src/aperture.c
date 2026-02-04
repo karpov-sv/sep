@@ -434,6 +434,8 @@ int sep_sum_circle_optimal(
     for (ix = xmin; ix < xmax; ix++) {
       dx = ix - x;
       dy = iy - y;
+      double dx0 = dx;
+      double dy0 = dy;
       rpix2 = dx * dx + dy * dy;
       if (rpix2 < r_out2) {
         if (rpix2 > r_in2) {
@@ -487,7 +489,7 @@ int sep_sum_circle_optimal(
           maskarea += overlap;
         } else {
           if (varpix > 0.0) {
-            psf = gaussian_pixel_integral(dx, dy, sigma) * overlap;
+            psf = gaussian_pixel_integral(dx0, dy0, sigma) * overlap;
             num += psf * pix / varpix;
             den += psf * psf / varpix;
           } else {
@@ -902,6 +904,8 @@ static int sep_sum_circle_optimal_multi_impl(
           int idx = gidx[i];
           dx = ix - x[idx];
           dy = iy - y[idx];
+          double dx0 = dx;
+          double dy0 = dy;
           rpix2 = dx * dx + dy * dy;
           overlap = 0.0;
           if (rpix2 < r_out2[idx]) {
@@ -935,7 +939,7 @@ static int sep_sum_circle_optimal_multi_impl(
               flag[idx] |= SEP_APER_HASMASKED;
               maskarea[i] += overlap;
             } else {
-              ai[i] = overlap * gaussian_pixel_integral(dx, dy, sigma_arr[idx]);
+              ai[i] = overlap * gaussian_pixel_integral(dx0, dy0, sigma_arr[idx]);
             }
           }
         }
