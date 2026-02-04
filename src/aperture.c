@@ -900,6 +900,7 @@ static int sep_sum_circle_optimal_multi_impl(
           ismasked = 1;
         }
 
+        double union_overlap = 0.0;
         for (i = 0; i < gcount; i++) {
           int idx = gidx[i];
           dx = ix - x[idx];
@@ -932,15 +933,27 @@ static int sep_sum_circle_optimal_multi_impl(
             }
           }
 
-          ai[i] = 0.0;
           if (overlap > 0.0) {
             totarea[i] += overlap;
             if (ismasked) {
               flag[idx] |= SEP_APER_HASMASKED;
               maskarea[i] += overlap;
-            } else {
-              ai[i] = overlap * gaussian_pixel_integral(dx0, dy0, sigma_arr[idx]);
             }
+            if (overlap > union_overlap) {
+              union_overlap = overlap;
+            }
+          }
+
+          ai[i] = gaussian_pixel_integral(dx0, dy0, sigma_arr[idx]);
+        }
+
+        if (!ismasked && union_overlap > 0.0) {
+          for (i = 0; i < gcount; i++) {
+            ai[i] *= union_overlap;
+          }
+        } else {
+          for (i = 0; i < gcount; i++) {
+            ai[i] = 0.0;
           }
         }
 
