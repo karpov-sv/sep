@@ -313,4 +313,57 @@ void analyse(int no, objliststruct * objlist, int robust, double gain) {
   } else {
     obj->abcor = 1.0;
   }
+
+  /* Compute Gaussian-core FWHM (ported from SExtractor).
+   * Assumes background-subtracted data (SEP does not store per-object bkg). */
+  {
+    PIXTYPE thresh0;
+    double s, sx, sxx, sy, sxy;
+    double dx, dy, d2, lpix, pix, b, d, bmax, w;
+    double mx_fwhm = obj->mx;
+    double my_fwhm = obj->my;
+
+    thresh0 = obj->dpeak / 5.0;
+    if (thresh0 < obj->thresh) {
+      thresh0 = obj->thresh;
+    }
+
+    if (thresh0 > 0.0 && obj->a > 0.0f && obj->b > 0.0f) {
+      s = sx = sxx = sy = sxy = 0.0;
+      for (pixt = pixel + obj->firstpix; pixt >= pixel;
+           pixt = pixel + PLIST(pixt, nextpix))
+      {
+        pix = (double)PLISTPIX(pixt, value);
+        if (pix > thresh0) {
+          dx = (double)PLIST(pixt, x) - mx_fwhm;
+          dy = (double)PLIST(pixt, y) - my_fwhm;
+          lpix = log(pix);
+          d2 = dx * dx + dy * dy;
+          w = pix * pix;
+          s += w;
+          sx += d2 * w;
+          sxx += d2 * d2 * w;
+          sy += lpix * w;
+          sxy += lpix * d2 * w;
+        }
+      }
+
+      d = s * sxx - sx * sx;
+      if (fabs(d) > 0.0) {
+        b = -(s * sxy - sx * sy) / d;
+        bmax = 1.0 / (13.0 * obj->a * obj->b);
+        if (b < bmax) {
+          b = bmax;
+        }
+        obj->fwhm = (float)(1.6651 / sqrt(b));
+        if (obj->fwhm > 0.0f) {
+          obj->fwhm -= (float)(1.0 / (4.0 * obj->fwhm));
+        }
+      } else {
+        obj->fwhm = 0.0f;
+      }
+    } else {
+      obj->fwhm = 0.0f;
+    }
+  }
 }

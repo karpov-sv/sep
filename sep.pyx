@@ -115,6 +115,7 @@ cdef extern from "sep.h":
         float  *a
         float  *b
         float  *theta
+        float  *fwhm
         float  *cxx
         float  *cyy
         float  *cxy
@@ -617,6 +618,7 @@ cdef packed struct Object:
     np.float64_t a
     np.float64_t b
     np.float64_t theta
+    np.float64_t fwhm
     np.float64_t cxx
     np.float64_t cyy
     np.float64_t cxy
@@ -744,6 +746,8 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         * ``a``, ``b``, ``theta`` (float) Ellipse parameters, scaled as
           described by Section 8.4.2 in "The Source Extractor Guide" or
           Section 10.1.5-6 of v2.13 of SExtractor's User Manual.
+        * ``fwhm`` (float) Gaussian-core FWHM (pixels), computed assuming
+          background-subtracted data.
         * ``cxx``, ``cyy``, ``cxy`` (float) Alternative ellipse parameters.
         * ``cflux`` (float) Sum of member pixels in convolved data.
         * ``flux`` (float) Sum of member pixels in unconvolved data.
@@ -867,6 +871,7 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
                                       ('a', np.float64),
                                       ('b', np.float64),
                                       ('theta', np.float64),
+                                      ('fwhm', np.float64),
                                       ('cxx', np.float64),
                                       ('cyy', np.float64),
                                       ('cxy', np.float64),
@@ -899,6 +904,7 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         result['a'][i] = catalog.a[i]
         result['b'][i] = catalog.b[i]
         result['theta'][i] = catalog.theta[i]
+        result['fwhm'][i] = catalog.fwhm[i]
         result['cxx'][i] = catalog.cxx[i]
         result['cyy'][i] = catalog.cyy[i]
         result['cxy'][i] = catalog.cxy[i]

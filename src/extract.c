@@ -1219,6 +1219,7 @@ void free_catalog_fields(sep_catalog * catalog) {
   free(catalog->a);
   free(catalog->b);
   free(catalog->theta);
+  free(catalog->fwhm);
   free(catalog->cxx);
   free(catalog->cyy);
   free(catalog->cxy);
@@ -1297,6 +1298,7 @@ int convert_to_catalog(
   QMALLOC(cat->a, float, nobj, status);
   QMALLOC(cat->b, float, nobj, status);
   QMALLOC(cat->theta, float, nobj, status);
+  QMALLOC(cat->fwhm, float, nobj, status);
   QMALLOC(cat->cxx, float, nobj, status);
   QMALLOC(cat->cyy, float, nobj, status);
   QMALLOC(cat->cxy, float, nobj, status);
@@ -1336,6 +1338,7 @@ int convert_to_catalog(
       cat->a[j] = obj->a;
       cat->b[j] = obj->b;
       cat->theta[j] = obj->theta;
+      cat->fwhm[j] = obj->fwhm;
 
       cat->cxx[j] = obj->cxx;
       cat->cyy[j] = obj->cyy;
