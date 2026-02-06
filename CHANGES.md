@@ -1,3 +1,10 @@
+Unreleased
+==========
+
+* Add sigma-clipped annulus background controls (`clip_sigma`, `clip_iters`)
+  to `sum_circle`, `sum_ellipse`, and `sum_circle_optimal`, with a fast
+  legacy fallback when `clip_iters=0`.
+
 v1.3.7 (8 November 2024)
 ========================
 

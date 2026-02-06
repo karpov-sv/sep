@@ -201,6 +201,14 @@ cdef extern from "sep.h":
                           double *mad_std, double *mean_clip,
                           double *area, double *sumerr, short *flag)
 
+    int sep_stats_ellipann(const sep_image *image,
+                           double x, double y, double a, double b, double theta,
+                           double rin, double rout, int id, int subpix,
+                           short inflags, double clip_sigma, int clip_iters,
+                           double *mean, double *std, double *median,
+                           double *mad_std, double *mean_clip,
+                           double *area, double *sumerr, short *flag)
+
     int sep_sum_ellipse(const sep_image *image,
                         double x, double y, double a, double b, double theta,
                         double r, int id, int subpix, short inflags,
@@ -948,10 +956,12 @@ def sum_circle(np.ndarray data not None, x, y, r,
                var=None, err=None, gain=None, np.ndarray mask=None,
                double maskthresh=0.0,
                seg_id=None, np.ndarray segmap=None,
-               bkgann=None, int subpix=5):
+               bkgann=None, int subpix=5,
+               double clip_sigma=3.0, int clip_iters=5):
     """sum_circle(data, x, y, r, err=None, var=None, mask=None, maskthresh=0.0,
                   segmap=None, seg_id=None,
-                  bkgann=None, gain=None, subpix=5)
+                  bkgann=None, gain=None, subpix=5,
+                  clip_sigma=3.0, clip_iters=5)
 
     Sum data in circular aperture(s).
 
@@ -996,7 +1006,9 @@ def sum_circle(np.ndarray data not None, x, y, r,
     bkgann : tuple, optional
         Length 2 tuple giving the inner and outer radius of a
         "background annulus". If supplied, the background is estimated
-        by averaging unmasked pixels in this annulus. If supplied, the inner
+        by averaging unmasked pixels in this annulus. If ``clip_iters=0``,
+        this reduces to the unclipped annulus mean (legacy behavior). If
+        supplied, the inner
         and outer radii obey numpy broadcasting rules along with ``x``,
         ``y`` and ``r``.
 
@@ -1008,6 +1020,13 @@ def sum_circle(np.ndarray data not None, x, y, r,
     subpix : int, optional
         Subpixel sampling factor. If 0, exact overlap is calculated.
         Default is 5.
+
+    clip_sigma : float, optional
+        Sigma value for clipping when ``bkgann`` is provided. Default is 3.0.
+
+    clip_iters : int, optional
+        Maximum number of clipping iterations when ``bkgann`` is provided.
+        Default is 5. Set to 0 to disable clipping.
 
     Returns
     -------
@@ -1024,6 +1043,7 @@ def sum_circle(np.ndarray data not None, x, y, r,
 
     cdef double flux1, fluxerr1, area1
     cdef double bkgflux, bkgfluxerr, bkgarea
+    cdef double mean, std, med, mad_std, mean_clip
     cdef short flag1, bkgflag
     cdef int status
     cdef np.broadcast it
@@ -1117,25 +1137,45 @@ def sum_circle(np.ndarray data not None, x, y, r,
 
             # background subtraction
             # Note that background output flags are not used.
-            status = sep_sum_circann(
-                &im,
-                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
-                (<int*>np.PyArray_MultiIter_DATA(it, 5))[0],
-                1, SEP_MASK_IGNORE, &bkgflux, &bkgfluxerr, &bkgarea, &bkgflag)
-            _assert_ok(status)
-
-            if not bkgarea > 0:
-                raise ValueError(
-                    "The background annulus does not contain any valid pixels, "
-                    "for the object at index "
-                    f"{np.PyArray_MultiIter_INDEX(it)}."
-                )
+            if clip_iters == 0:
+                status = sep_sum_circann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 5))[0],
+                    1, SEP_MASK_IGNORE, &bkgflux, &bkgfluxerr, &bkgarea, &bkgflag)
+                _assert_ok(status)
+                if not bkgarea > 0:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
+                mean_clip = bkgflux / bkgarea
+            else:
+                status = sep_stats_circann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 5))[0],
+                    1, SEP_MASK_IGNORE,
+                    clip_sigma, clip_iters,
+                    &mean, &std, &med, &mad_std, &mean_clip,
+                    &bkgarea, &bkgfluxerr, &bkgflag)
+                _assert_ok(status)
+                if not bkgarea > 0 or mean_clip != mean_clip:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
 
             if area1 > 0:
-                flux1 -= bkgflux / bkgarea * area1
+                flux1 -= mean_clip * area1
                 bkgfluxerr = bkgfluxerr / bkgarea * area1
                 fluxerr1 = sqrt(fluxerr1*fluxerr1 + bkgfluxerr*bkgfluxerr)
             (<double*>np.PyArray_MultiIter_DATA(it, 6))[0] = flux1
@@ -1153,28 +1193,31 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                        var=None, err=None, gain=None, np.ndarray mask=None,
                        double maskthresh=0.0,
                        seg_id=None, np.ndarray segmap=None,
-                       bkgann=None, bint grouped=False, int subpix=5):
+                       bkgann=None, bint grouped=False, int subpix=5,
+                       double clip_sigma=3.0, int clip_iters=5):
     """sum_circle_optimal(data, x, y, r, fwhm, err=None, var=None,
                            mask=None, maskthresh=0.0,
                            segmap=None, seg_id=None,
                            bkgann=None, gain=None,
-                           grouped=False, subpix=5)
+                           grouped=False, subpix=5,
+                           clip_sigma=3.0, clip_iters=5)
 
     Optimal extraction in circular aperture(s) using a Gaussian PSF.
 
     Parameters are identical to `~sep.sum_circle`, with the addition of
     ``fwhm`` which sets the Gaussian PSF width used for weighting.
     ``bkgann`` may be supplied to subtract a local background annulus using
-    a sigma-clipped mean. Set ``grouped=True`` to auto-group overlapping
+    a sigma-clipped mean. Set ``clip_iters=0`` to disable clipping.
+    ``clip_sigma`` and ``clip_iters`` control the sigma-clipping parameters
+    used for the annulus statistics.
+    Set ``grouped=True`` to auto-group overlapping
     apertures and solve all fluxes in each group simultaneously; in this
     case the background is estimated per group from the members' annuli.
     """
 
     cdef double flux1, fluxerr1, area1
-    cdef double bkgfluxerr, bkgarea
+    cdef double bkgflux, bkgfluxerr, bkgarea
     cdef double mean, std, med, mad_std, mean_clip
-    cdef double clip_sigma = 3.0
-    cdef int clip_iters = 5
     cdef short flag1, bkgflag
     cdef int status
     cdef np.broadcast it
@@ -1294,34 +1337,58 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
         bkg_weight_arr = np.empty(n, dtype=np.float64)
 
         for i in range(n):
-            status = sep_stats_circann(
-                &im,
-                (<double*>x1.data)[i],
-                (<double*>y1.data)[i],
-                (<double*>rin1.data)[i],
-                (<double*>rout1.data)[i],
-                (<int*>seg_id1.data)[i],
-                1,
-                SEP_MASK_IGNORE,
-                clip_sigma,
-                clip_iters,
-                &mean,
-                &std,
-                &med,
-                &mad_std,
-                &mean_clip,
-                &bkgarea,
-                &bkgfluxerr,
-                &bkgflag
-            )
-            _assert_ok(status)
-
-            if not bkgarea > 0 or mean_clip != mean_clip:
-                raise ValueError(
-                    "The background annulus does not contain any valid pixels, "
-                    "for the object at index "
-                    f"{i}."
+            if clip_iters == 0:
+                status = sep_sum_circann(
+                    &im,
+                    (<double*>x1.data)[i],
+                    (<double*>y1.data)[i],
+                    (<double*>rin1.data)[i],
+                    (<double*>rout1.data)[i],
+                    (<int*>seg_id1.data)[i],
+                    1,
+                    SEP_MASK_IGNORE,
+                    &bkgflux,
+                    &bkgfluxerr,
+                    &bkgarea,
+                    &bkgflag
                 )
+                _assert_ok(status)
+                if not bkgarea > 0:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{i}."
+                    )
+                mean_clip = bkgflux / bkgarea
+            else:
+                status = sep_stats_circann(
+                    &im,
+                    (<double*>x1.data)[i],
+                    (<double*>y1.data)[i],
+                    (<double*>rin1.data)[i],
+                    (<double*>rout1.data)[i],
+                    (<int*>seg_id1.data)[i],
+                    1,
+                    SEP_MASK_IGNORE,
+                    clip_sigma,
+                    clip_iters,
+                    &mean,
+                    &std,
+                    &med,
+                    &mad_std,
+                    &mean_clip,
+                    &bkgarea,
+                    &bkgfluxerr,
+                    &bkgflag
+                )
+                _assert_ok(status)
+
+                if not bkgarea > 0 or mean_clip != mean_clip:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{i}."
+                    )
 
             bkg_mean_arr[i] = mean_clip
             bkg_weight_arr[i] = bkgarea
@@ -1401,34 +1468,58 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                 subpix, 0, &flux1, &fluxerr1, &area1, &flag1)
             _assert_ok(status)
 
-            status = sep_stats_circann(
-                &im,
-                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 5))[0],
-                (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
-                1,
-                SEP_MASK_IGNORE,
-                clip_sigma,
-                clip_iters,
-                &mean,
-                &std,
-                &med,
-                &mad_std,
-                &mean_clip,
-                &bkgarea,
-                &bkgfluxerr,
-                &bkgflag
-            )
-            _assert_ok(status)
-
-            if not bkgarea > 0 or mean_clip != mean_clip:
-                raise ValueError(
-                    "The background annulus does not contain any valid pixels, "
-                    "for the object at index "
-                    f"{np.PyArray_MultiIter_INDEX(it)}."
+            if clip_iters == 0:
+                status = sep_sum_circann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 5))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                    1,
+                    SEP_MASK_IGNORE,
+                    &bkgflux,
+                    &bkgfluxerr,
+                    &bkgarea,
+                    &bkgflag
                 )
+                _assert_ok(status)
+                if not bkgarea > 0:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
+                mean_clip = bkgflux / bkgarea
+            else:
+                status = sep_stats_circann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 5))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                    1,
+                    SEP_MASK_IGNORE,
+                    clip_sigma,
+                    clip_iters,
+                    &mean,
+                    &std,
+                    &med,
+                    &mad_std,
+                    &mean_clip,
+                    &bkgarea,
+                    &bkgfluxerr,
+                    &bkgflag
+                )
+                _assert_ok(status)
+
+                if not bkgarea > 0 or mean_clip != mean_clip:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
 
             if area1 > 0:
                 flux1 -= mean_clip * area1
@@ -1740,10 +1831,11 @@ def sum_ellipse(np.ndarray data not None, x, y, a, b, theta, r=1.0,
                 var=None, err=None, gain=None, np.ndarray mask=None,
                 double maskthresh=0.0,
                 seg_id=None, np.ndarray segmap=None,
-                bkgann=None, int subpix=5):
+                bkgann=None, int subpix=5,
+                double clip_sigma=3.0, int clip_iters=5):
     """sum_ellipse(data, x, y, a, b, theta, r, err=None, var=None, mask=None,
                    maskthresh=0.0, seg_id=None, segmap=None, bkgann=None,
-                   gain=None, subpix=5)
+                   gain=None, subpix=5, clip_sigma=3.0, clip_iters=5)
 
     Sum data in elliptical aperture(s).
 
@@ -1802,7 +1894,8 @@ def sum_ellipse(np.ndarray data not None, x, y, a, b, theta, r=1.0,
     bkgann : tuple, optional
         Length 2 tuple giving the inner and outer radius of a
         "background annulus". If supplied, the background is estimated
-        by averaging unmasked pixels in this annulus. If supplied, the inner
+        by averaging unmasked pixels in this annulus. If ``clip_iters=0``,
+        this reduces to the unclipped annulus mean (legacy behavior). If supplied, the inner
         and outer radii obey numpy broadcasting rules, along with ``x``,
         ``y``, and ellipse parameters.
 
@@ -1813,6 +1906,13 @@ def sum_ellipse(np.ndarray data not None, x, y, a, b, theta, r=1.0,
 
     subpix : int, optional
         Subpixel sampling factor. Default is 5.
+
+    clip_sigma : float, optional
+        Sigma value for clipping when ``bkgann`` is provided. Default is 3.0.
+
+    clip_iters : int, optional
+        Maximum number of clipping iterations when ``bkgann`` is provided.
+        Default is 5. Set to 0 to disable clipping.
 
     Returns
     -------
@@ -1829,6 +1929,7 @@ def sum_ellipse(np.ndarray data not None, x, y, a, b, theta, r=1.0,
 
     cdef double flux1, fluxerr1, x1, y1, r1, area1, rin1, rout1
     cdef double bkgflux, bkgfluxerr, bkgarea
+    cdef double mean, std, med, mad_std, mean_clip
     cdef short flag1, bkgflag
     cdef size_t i
     cdef int status
@@ -1920,28 +2021,53 @@ def sum_ellipse(np.ndarray data not None, x, y, a, b, theta, r=1.0,
                 subpix, 0, &flux1, &fluxerr1, &area1, &flag1)
             _assert_ok(status)
 
-            status = sep_sum_ellipann(
-                &im,
-                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 6))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 7))[0],
-                (<int*>np.PyArray_MultiIter_DATA(it, 8))[0],
-                subpix, 0, &bkgflux, &bkgfluxerr, &bkgarea, &bkgflag)
-            _assert_ok(status)
+            if clip_iters == 0:
+                status = sep_sum_ellipann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 7))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 8))[0],
+                    subpix, 0, &bkgflux, &bkgfluxerr, &bkgarea, &bkgflag)
+                _assert_ok(status)
 
-            if not bkgarea > 0:
-                raise ValueError(
-                    "The background annulus does not contain any valid pixels, "
-                    "for the object at index "
-                    f"{np.PyArray_MultiIter_INDEX(it)}."
-                )
+                if not bkgarea > 0:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
+                mean_clip = bkgflux / bkgarea
+            else:
+                status = sep_stats_ellipann(
+                    &im,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 6))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 7))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 8))[0],
+                    subpix, SEP_MASK_IGNORE,
+                    clip_sigma, clip_iters,
+                    &mean, &std, &med, &mad_std, &mean_clip,
+                    &bkgarea, &bkgfluxerr, &bkgflag)
+                _assert_ok(status)
+
+                if not bkgarea > 0 or mean_clip != mean_clip:
+                    raise ValueError(
+                        "The background annulus does not contain any valid pixels, "
+                        "for the object at index "
+                        f"{np.PyArray_MultiIter_INDEX(it)}."
+                    )
 
             if (area1 > 0):
-              flux1 -= bkgflux / bkgarea * area1
+              flux1 -= mean_clip * area1
               bkgfluxerr = bkgfluxerr / bkgarea * area1
               fluxerr1 = sqrt(fluxerr1*fluxerr1 + bkgfluxerr*bkgfluxerr)
 

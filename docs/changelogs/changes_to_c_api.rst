@@ -94,6 +94,10 @@ All changes here are transparent to users of the Python interface.
 
  - Added ``area`` and ``sumerr`` outputs.
 
+.. c:function:: int sep_stats_ellipann()
+
+ - Added elliptical-annulus statistics with sigma-clipped mean.
+
 .. c:function:: int sep_flux_radius()
 
  - The type of ``n`` has changed from ``int`` to ``int64_t``.

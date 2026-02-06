@@ -404,6 +404,30 @@ SEP_API int sep_stats_circann(
     short * flag
 );
 
+SEP_API int sep_stats_ellipann(
+    const sep_image * image,
+    double x,
+    double y,
+    double a,
+    double b,
+    double theta,
+    double rin,
+    double rout,
+    int id,
+    int subpix,
+    short inflags,
+    double clip_sigma,
+    int clip_iters,
+    double * mean,
+    double * std,
+    double * median,
+    double * mad_std,
+    double * mean_clip,
+    double * area,
+    double * sumerr,
+    short * flag
+);
+
 SEP_API int sep_sum_ellipse(
     const sep_image * image,
     double x,

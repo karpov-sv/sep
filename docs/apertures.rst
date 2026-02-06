@@ -100,7 +100,8 @@ For close pairs of objects, set ``grouped=True`` to auto-group overlapping
 apertures and solve all fluxes in the group simultaneously using the same
 optimal-extraction formalism.
 When ``bkgann`` is provided, the background is estimated using a
-sigma-clipped mean of the annulus values. With ``grouped=True``, a
+sigma-clipped mean of the annulus values (set ``clip_iters=0`` to disable
+clipping and use the legacy mean). With ``grouped=True``, a
 group-local background is computed from the members' annuli and applied
 uniformly to the group.
 
@@ -126,12 +127,16 @@ background calculated in an annulus between 6 and 8 pixel radius:
 .. code-block:: python
 
    flux, fluxerr, flag = sep.sum_circle(data, objs['x'], objs['y'], 3.0,
-                                        mask=mask, bkgann=(6., 8.))
+                                        mask=mask, bkgann=(6., 8.),
+                                        clip_sigma=3.0, clip_iters=5)
 
 Pixels in the background annulus are not subsampled and any masked
 pixels in the annulus are completely igored rather than corrected.
 The inner and outer radii can also be arrays. The error in the background
 is included in the reported error.
+
+Set ``clip_iters=0`` to use the legacy (unclipped) annulus mean, which can
+be faster for large catalogs.
 
 Equivalent of FLUX_AUTO (e.g., MAG_AUTO) in Source Extractor
 ------------------------------------------------------------
