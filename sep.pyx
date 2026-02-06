@@ -175,14 +175,16 @@ cdef extern from "sep.h":
     int sep_sum_circle_optimal_multi(const sep_image *image,
                                      double *x, double *y, double *r,
                                      double *fwhm, np.int64_t n,
-                                     int *id, int subpix, short inflags,
+                                     int *id, double group_factor,
+                                     int subpix, short inflags,
                                      double *sum, double *sumerr, double *area,
                                      short *flag)
 
     int sep_sum_circle_optimal_multi_bkg(const sep_image *image,
                                          double *x, double *y, double *r,
                                          double *fwhm, np.int64_t n,
-                                         int *id, int subpix, short inflags,
+                                         int *id, double group_factor,
+                                         int subpix, short inflags,
                                          double *bkg_mean, double *bkg_mean_err,
                                          double *bkg_weight,
                                          double *sum, double *sumerr,
@@ -1194,13 +1196,15 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                        double maskthresh=0.0,
                        seg_id=None, np.ndarray segmap=None,
                        bkgann=None, bint grouped=False, int subpix=5,
-                       double clip_sigma=3.0, int clip_iters=5):
+                       double clip_sigma=3.0, int clip_iters=5,
+                       double group_radius_factor=1.0):
     """sum_circle_optimal(data, x, y, r, fwhm, err=None, var=None,
                            mask=None, maskthresh=0.0,
                            segmap=None, seg_id=None,
                            bkgann=None, gain=None,
                            grouped=False, subpix=5,
-                           clip_sigma=3.0, clip_iters=5)
+                           clip_sigma=3.0, clip_iters=5,
+                           group_radius_factor=1.0)
 
     Optimal extraction in circular aperture(s) using a Gaussian PSF.
 
@@ -1213,6 +1217,8 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
     Set ``grouped=True`` to auto-group overlapping
     apertures and solve all fluxes in each group simultaneously; in this
     case the background is estimated per group from the members' annuli.
+    ``group_radius_factor`` scales the grouping radius (1.0 matches the
+    aperture overlap criterion).
     """
 
     cdef double flux1, fluxerr1, area1
@@ -1235,6 +1241,8 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
 
     if (segmap is not None) and (seg_id is None):
         raise ValueError('`segmap` supplied but not `seg_id`.')
+    if group_radius_factor <= 0.0:
+        raise ValueError('`group_radius_factor` must be positive.')
 
     _parse_arrays(data, err, var, mask, segmap, &im)
     im.maskthresh = maskthresh
@@ -1289,6 +1297,7 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                 <double*>fwhm1.data,
                 n,
                 <int*>seg_id1.data,
+                group_radius_factor,
                 subpix,
                 0,
                 <double*>sum1.data,
@@ -1402,6 +1411,7 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
             <double*>fwhm1.data,
             n,
             <int*>seg_id1.data,
+            group_radius_factor,
             subpix,
             0,
             <double*>bkg_mean_arr.data,

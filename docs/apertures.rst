@@ -98,7 +98,8 @@ assumed and the estimator reduces to a PSF-weighted sum.
 
 For close pairs of objects, set ``grouped=True`` to auto-group overlapping
 apertures and solve all fluxes in the group simultaneously using the same
-optimal-extraction formalism.
+optimal-extraction formalism. Use ``group_radius_factor`` to scale the
+grouping radius (1.0 matches the aperture overlap criterion).
 When ``bkgann`` is provided, the background is estimated using a
 sigma-clipped mean of the annulus values (set ``clip_iters=0`` to disable
 clipping and use the legacy mean). With ``grouped=True``, a

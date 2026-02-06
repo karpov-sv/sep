@@ -488,10 +488,18 @@ int sep_sum_circle_optimal(
           *flag |= SEP_APER_HASMASKED;
           maskarea += overlap;
         } else {
-          if (varpix > 0.0) {
-            psf = gaussian_pixel_integral(dx0, dy0, sigma) * overlap;
-            num += psf * pix / varpix;
-            den += psf * psf / varpix;
+          if (varpix > 0.0 && overlap > 0.0) {
+            double scale = overlap;
+            double pix_eff = pix * scale;
+            double var_eff = varpix * scale * scale;
+            psf = gaussian_pixel_integral(dx0, dy0, sigma) * scale;
+            if (var_eff > 0.0) {
+              num += psf * pix_eff / var_eff;
+              den += psf * psf / var_eff;
+            } else {
+              *flag |= SEP_APER_HASMASKED;
+              maskarea += overlap;
+            }
           } else {
             *flag |= SEP_APER_HASMASKED;
             maskarea += overlap;
@@ -552,6 +560,7 @@ static int sep_sum_circle_optimal_multi_impl(
     const double * fwhm,
     int64_t n,
     const int * id,
+    double group_factor,
     int subpix,
     short inflag,
     const double * bkg_mean,
@@ -579,6 +588,9 @@ static int sep_sum_circle_optimal_multi_impl(
   int use_bkg;
 
   if (n < 1) {
+    return ILLEGAL_APER_PARAMS;
+  }
+  if (!(group_factor > 0.0)) {
     return ILLEGAL_APER_PARAMS;
   }
   if (subpix < 0) {
@@ -656,7 +668,7 @@ static int sep_sum_circle_optimal_multi_impl(
     for (j = i + 1; j < n; j++) {
       dx = x[i] - x[j];
       dy = y[i] - y[j];
-      rsum = r[i] + r[j];
+      rsum = group_factor * (r[i] + r[j]);
       dist2 = dx * dx + dy * dy;
       if (dist2 <= rsum * rsum) {
         uf_union(parent, rank, i, j);
@@ -948,27 +960,33 @@ static int sep_sum_circle_optimal_multi_impl(
         }
 
         if (!ismasked && union_overlap > 0.0) {
+          double scale = union_overlap;
+          double pix_eff = pix * scale;
+          double var_eff = varpix * scale * scale;
           for (i = 0; i < gcount; i++) {
-            ai[i] *= union_overlap;
+            ai[i] *= scale;
+          }
+          if (var_eff > 0.0) {
+            double w = 1.0 / var_eff;
+            for (i = 0; i < gcount; i++) {
+              if (ai[i] <= 0.0) {
+                continue;
+              }
+              b[i] += w * ai[i] * pix_eff;
+              for (j = 0; j <= i; j++) {
+                if (ai[j] > 0.0) {
+                  M[i * gcount + j] += w * ai[i] * ai[j];
+                }
+              }
+            }
+          } else {
+            for (i = 0; i < gcount; i++) {
+              ai[i] = 0.0;
+            }
           }
         } else {
           for (i = 0; i < gcount; i++) {
             ai[i] = 0.0;
-          }
-        }
-
-        if (!ismasked) {
-          double w = 1.0 / varpix;
-          for (i = 0; i < gcount; i++) {
-            if (ai[i] <= 0.0) {
-              continue;
-            }
-            b[i] += w * ai[i] * pix;
-            for (j = 0; j <= i; j++) {
-              if (ai[j] > 0.0) {
-                M[i * gcount + j] += w * ai[i] * ai[j];
-              }
-            }
           }
         }
 
@@ -1112,6 +1130,7 @@ int sep_sum_circle_optimal_multi(
     const double * fwhm,
     int64_t n,
     const int * id,
+    double group_factor,
     int subpix,
     short inflag,
     double * sum,
@@ -1120,7 +1139,7 @@ int sep_sum_circle_optimal_multi(
     short * flag
 ) {
   return sep_sum_circle_optimal_multi_impl(
-      im, x, y, r, fwhm, n, id, subpix, inflag,
+      im, x, y, r, fwhm, n, id, group_factor, subpix, inflag,
       NULL, NULL, NULL, sum, sumerr, area, flag
   );
 }
@@ -1133,6 +1152,7 @@ int sep_sum_circle_optimal_multi_bkg(
     const double * fwhm,
     int64_t n,
     const int * id,
+    double group_factor,
     int subpix,
     short inflag,
     const double * bkg_mean,
@@ -1144,7 +1164,7 @@ int sep_sum_circle_optimal_multi_bkg(
     short * flag
 ) {
   return sep_sum_circle_optimal_multi_impl(
-      im, x, y, r, fwhm, n, id, subpix, inflag,
+      im, x, y, r, fwhm, n, id, group_factor, subpix, inflag,
       bkg_mean, bkg_mean_err, bkg_weight, sum, sumerr, area, flag
   );
 }

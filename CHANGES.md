@@ -2,7 +2,7 @@ Unreleased
 ==========
 
 * Add optimal-extraction circular photometry (`sum_circle_optimal`) with
-  auto-grouping for overlapping apertures.
+  auto-grouping for overlapping apertures and configurable grouping radius.
 * Add sigma-clipped annulus statistics (`stats_circann`, `stats_ellipann`)
   for robust local background estimation.
 * Add sigma-clipped annulus background controls (`clip_sigma`, `clip_iters`)

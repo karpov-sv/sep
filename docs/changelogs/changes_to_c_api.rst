@@ -84,11 +84,13 @@ All changes here are transparent to users of the Python interface.
 .. c:function:: int sep_sum_circle_optimal_multi()
 
  - Added grouped optimal-extraction circular aperture photometry.
+ - Added ``group_factor`` parameter to control grouping radius.
 
 .. c:function:: int sep_sum_circle_optimal_multi_bkg()
 
  - Added grouped optimal-extraction photometry with group-local background
-   subtraction.
+  subtraction.
+ - Added ``group_factor`` parameter to control grouping radius.
 
 .. c:function:: int sep_stats_circann()
 
