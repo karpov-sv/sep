@@ -106,6 +106,7 @@ Usage Guide
    tutorial
    filter
    apertures
+   psf
    changelogs/changelog
 
 .. toctree::

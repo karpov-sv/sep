@@ -22,6 +22,16 @@ Reference/API
    sep.sum_ellipse
    sep.sum_ellipann
 
+**PSF photometry**
+
+.. autosummary::
+   :toctree: api
+
+   sep.PSF
+   sep.PSF.from_gaussian
+   sep.PSF.from_psfex
+   sep.psf_fit
+
 **Aperture utilities**
 
 .. autosummary::
