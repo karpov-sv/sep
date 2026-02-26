@@ -92,6 +92,90 @@ static double svd_pythag(double a, double b) {
   return 0.0;
 }
 
+/*--------------------------------------------------------------------------*/
+/* Workspace helpers for threaded fitting                                   */
+/*--------------------------------------------------------------------------*/
+
+static void psf_workspace_nullify(sep_psf *psf) {
+  if (!psf) return;
+  psf->loc = NULL;
+  psf->resi = NULL;
+  psf->interp_mask = NULL;
+  psf->interp_nmask = NULL;
+  psf->interp_start = NULL;
+  psf->interp_buf = NULL;
+  psf->fit_mat = NULL;
+  psf->fit_dvec = NULL;
+  psf->fit_weight = NULL;
+  psf->fit_sol = NULL;
+  psf->fit_vmat = NULL;
+  psf->fit_wmat = NULL;
+  psf->fit_covmat = NULL;
+  psf->svd_rv1 = NULL;
+  psf->svd_tmp = NULL;
+}
+
+static void psf_workspace_free(sep_psf *psf) {
+  if (!psf) return;
+  free(psf->loc);
+  free(psf->resi);
+  free(psf->interp_mask);
+  free(psf->interp_nmask);
+  free(psf->interp_start);
+  free(psf->interp_buf);
+  free(psf->fit_mat);
+  free(psf->fit_dvec);
+  free(psf->fit_weight);
+  free(psf->fit_sol);
+  free(psf->fit_vmat);
+  free(psf->fit_wmat);
+  free(psf->fit_covmat);
+  free(psf->svd_rv1);
+  free(psf->svd_tmp);
+  psf_workspace_nullify(psf);
+}
+
+#ifdef _OPENMP
+static int psf_workspace_clone(const sep_psf *src, sep_psf *dst) {
+  int status = RETURN_OK;
+  int npix, rnpix, npar;
+
+  memset(dst, 0, sizeof(*dst));
+  *dst = *src;
+  psf_workspace_nullify(dst);
+
+  /* Shared read-only model arrays */
+  dst->data = src->data;
+  dst->interp_lut = src->interp_lut;
+
+  npix = src->w * src->h;
+  rnpix = src->rw * src->rh;
+  npar = PSF_NA;
+
+  QMALLOC(dst->loc, float, npix, status);
+  QMALLOC(dst->resi, float, rnpix, status);
+  QMALLOC(dst->interp_mask, float, src->interp_mask_len, status);
+  QMALLOC(dst->interp_nmask, int, src->interp_nmask_len, status);
+  QMALLOC(dst->interp_start, int, src->interp_nmask_len, status);
+  QMALLOC(dst->interp_buf, float, src->interp_buf_len, status);
+  QMALLOC(dst->fit_mat, double, rnpix * npar, status);
+  QMALLOC(dst->fit_dvec, double, rnpix, status);
+  QMALLOC(dst->fit_weight, double, rnpix, status);
+  QMALLOC(dst->fit_sol, double, npar, status);
+  QMALLOC(dst->fit_vmat, double, npar * npar, status);
+  QMALLOC(dst->fit_wmat, double, npar, status);
+  QMALLOC(dst->fit_covmat, double, npar * npar, status);
+  QMALLOC(dst->svd_rv1, double, npar, status);
+  QMALLOC(dst->svd_tmp, double, npar, status);
+
+  return RETURN_OK;
+
+exit:
+  psf_workspace_free(dst);
+  return status;
+}
+#endif
+
 /*==========================================================================*/
 /*                         PSF Lifecycle                                    */
 /*==========================================================================*/
@@ -187,22 +271,8 @@ exit:
 void sep_psf_free(sep_psf *psf) {
   if (psf) {
     free(psf->data);
-    free(psf->loc);
-    free(psf->resi);
-    free(psf->interp_mask);
-    free(psf->interp_nmask);
-    free(psf->interp_start);
-    free(psf->interp_buf);
     free(psf->interp_lut);
-    free(psf->fit_mat);
-    free(psf->fit_dvec);
-    free(psf->fit_weight);
-    free(psf->fit_sol);
-    free(psf->fit_vmat);
-    free(psf->fit_wmat);
-    free(psf->fit_covmat);
-    free(psf->svd_rv1);
-    free(psf->svd_tmp);
+    psf_workspace_free(psf);
   }
   free(psf);
 }
@@ -213,11 +283,14 @@ void sep_psf_free(sep_psf *psf) {
 
 int sep_psf_build(sep_psf *psf, double x, double y) {
   double dx, dy, coeff;
-  float *comp;
+  const float *comp;
+  float *loc;
+  float fcoeff;
   int npix, i, i1, i2, p;
 
   npix = psf->w * psf->h;
-  memset(psf->loc, 0, (size_t)npix * sizeof(float));
+  loc = psf->loc;
+  memset(loc, 0, (size_t)npix * sizeof(float));
 
   dx = (psf->sx != 0.0) ? (x - psf->x0) / psf->sx : 0.0;
   dy = (psf->sy != 0.0) ? (y - psf->y0) / psf->sy : 0.0;
@@ -228,9 +301,11 @@ int sep_psf_build(sep_psf *psf, double x, double y) {
       if (i >= psf->ncomp) break;
       coeff = pow(dx, i1) * pow(dy, i2);
       comp = psf->data + (size_t)i * npix;
-      for (p = 0; p < npix; p++) {
-        psf->loc[p] += (float)(coeff * comp[p]);
-      }
+      fcoeff = (float)coeff;
+#if defined(_OPENMP)
+#pragma omp simd
+#endif
+      for (p = 0; p < npix; p++) loc[p] += fcoeff * comp[p];
       i++;
     }
   }
@@ -376,10 +451,13 @@ int sep_psf_resample(sep_psf *psf, double dx, double dy) {
     pixout = pixout0;
     for (j = nx2; j--; pixout += ny1) {
       pixin = pixin0 + *(startt++);
+      n = *(nmaskt++);
       val = 0.0f;
-      for (i = *(nmaskt++); i--;) {
-        val += *(maskt++) * *(pixin++);
-      }
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : val)
+#endif
+      for (i = 0; i < n; i++) val += maskt[i] * pixin[i];
+      maskt += n;
       *pixout = val;
     }
   }
@@ -424,10 +502,13 @@ int sep_psf_resample(sep_psf *psf, double dx, double dy) {
     pixout = pixout0;
     for (j = ny2; j--; pixout += w2) {
       pixin = pixin0 + *(startt++);
+      n = *(nmaskt++);
       val = 0.0f;
-      for (i = *(nmaskt++); i--;) {
-        val += *(maskt++) * *(pixin++);
-      }
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : val)
+#endif
+      for (i = 0; i < n; i++) val += maskt[i] * pixin[i];
+      maskt += n;
       *pixout = val;
     }
   }
@@ -912,47 +993,52 @@ int sep_sum_psf(const sep_image *im, sep_psf *psf, double x, double y, int id,
  */
 static void compute_gradient(const float *psfstamp, const double *weight,
                              int width, int height, double *mat) {
-  int x, y, idx;
-  double ps, w;
+  int x, y, idx, row, npix;
+  int top, bottom;
+  double *col0, *col1, *col2;
 
-  /* Column 0: weighted PSF (outer ring = 0) */
-  for (y = 0; y < height; y++) {
-    for (x = 0; x < width; x++) {
-      idx = y * width + x;
-      if (y == 0 || y == height - 1 || x == 0 || x == width - 1) {
-        *mat++ = 0.0;
-      } else {
-        *mat++ = psfstamp[idx] * weight[idx];
-      }
-    }
+  npix = width * height;
+  col0 = mat;
+  col1 = mat + npix;
+  col2 = mat + 2 * npix;
+
+  if (width <= 2 || height <= 2) {
+    memset(mat, 0, (size_t)npix * PSF_NA * sizeof(double));
+    return;
   }
 
-  /* Column 1: weighted x-derivative of PSF / 2 */
-  for (y = 0; y < height; y++) {
-    for (x = 0; x < width; x++) {
-      idx = y * width + x;
-      if (y == 0 || y == height - 1 || x == 0 || x == width - 1) {
-        *mat++ = 0.0;
-      } else {
-        ps = (psfstamp[idx + 1] - psfstamp[idx - 1]);
-        w = weight[idx];
-        *mat++ = ps * w / 2.0;
-      }
-    }
+  /* Zero only the border; interior values are written explicitly. */
+  top = 0;
+  bottom = (height - 1) * width;
+  for (x = 0; x < width; x++) {
+    col0[top + x] = 0.0;
+    col1[top + x] = 0.0;
+    col2[top + x] = 0.0;
+    col0[bottom + x] = 0.0;
+    col1[bottom + x] = 0.0;
+    col2[bottom + x] = 0.0;
   }
 
-  /* Column 2: weighted y-derivative of PSF / 2 */
-  for (y = 0; y < height; y++) {
-    for (x = 0; x < width; x++) {
-      idx = y * width + x;
-      if (y == 0 || y == height - 1 || x == 0 || x == width - 1) {
-        *mat++ = 0.0;
-      } else {
-        ps = (psfstamp[idx + width] - psfstamp[idx - width]);
-        w = weight[idx];
-        *mat++ = ps * w / 2.0;
-      }
+  for (y = 1; y < height - 1; y++) {
+    row = y * width;
+    col0[row] = 0.0;
+    col1[row] = 0.0;
+    col2[row] = 0.0;
+#if defined(_OPENMP)
+#pragma omp simd
+#endif
+    for (x = 1; x < width - 1; x++) {
+      double w;
+      idx = row + x;
+      w = weight[idx];
+      col0[idx] = psfstamp[idx] * w;
+      col1[idx] = (psfstamp[idx + 1] - psfstamp[idx - 1]) * w * 0.5;
+      col2[idx] = (psfstamp[idx + width] - psfstamp[idx - width]) * w * 0.5;
     }
+    idx = row + width - 1;
+    col0[idx] = 0.0;
+    col1[idx] = 0.0;
+    col2[idx] = 0.0;
   }
 }
 
@@ -1232,6 +1318,39 @@ int sep_psf_fit_array(const sep_image *im, sep_psf *psf, const double *x,
                       int maxiter, double *flux, double *fluxerr, double *xfit,
                       double *yfit, double *xerr, double *yerr, int *niter,
                       double *chi2, short *flag) {
+#ifdef _OPENMP
+  int first_status = RETURN_OK;
+
+#pragma omp parallel
+  {
+    sep_psf local_psf;
+    int ws_status = psf_workspace_clone(psf, &local_psf);
+
+    if (ws_status != RETURN_OK) {
+#pragma omp critical(psf_fit_status)
+      {
+        if (first_status == RETURN_OK) first_status = ws_status;
+      }
+    } else {
+#pragma omp for schedule(dynamic, 32)
+      for (int64_t i = 0; i < n; i++) {
+        int s = sep_psf_fit(im, &local_psf, x[i], y[i], id ? id[i] : 0, inflag,
+                            maxiter, &flux[i], &fluxerr[i], &xfit[i], &yfit[i],
+                            &xerr[i], &yerr[i], &niter[i], &chi2[i], &flag[i]);
+        if (s != RETURN_OK) {
+#pragma omp critical(psf_fit_status)
+          {
+            if (first_status == RETURN_OK) first_status = s;
+          }
+        }
+      }
+    }
+
+    psf_workspace_free(&local_psf);
+  }
+
+  return first_status;
+#else
   int status = RETURN_OK;
   int64_t i;
 
@@ -1243,6 +1362,7 @@ int sep_psf_fit_array(const sep_image *im, sep_psf *psf, const double *x,
   }
 
   return RETURN_OK;
+#endif
 }
 
 /*==========================================================================*/
@@ -1271,6 +1391,411 @@ static void psf_uf_union(int *parent, int *rank, int a, int b) {
   }
 }
 
+typedef struct {
+  double x;
+  int idx;
+} psf_xorder_entry;
+
+static int psf_xorder_cmp(const void *a, const void *b) {
+  const psf_xorder_entry *pa = (const psf_xorder_entry *)a;
+  const psf_xorder_entry *pb = (const psf_xorder_entry *)b;
+  if (pa->x < pb->x) return -1;
+  if (pa->x > pb->x) return 1;
+  return (pa->idx > pb->idx) - (pa->idx < pb->idx);
+}
+
+typedef struct {
+  int gid;
+  int count;
+} psf_group_order_entry;
+
+static int psf_group_order_cmp(const void *a, const void *b) {
+  const psf_group_order_entry *ga = (const psf_group_order_entry *)a;
+  const psf_group_order_entry *gb = (const psf_group_order_entry *)b;
+  if (ga->count > gb->count) return -1;
+  if (ga->count < gb->count) return 1;
+  return (ga->gid > gb->gid) - (ga->gid < gb->gid);
+}
+
+static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
+                         const double *y, const int *id, short inflag,
+                         int maxiter, const int *group_counts,
+                         const int *group_offsets, const int *members, int g,
+                         double *pflux, double *pfluxerr, double *pxfit,
+                         double *pyfit, double *pxerr, double *pyerr,
+                         int *pniter, double *pchi2, short *pflag) {
+  int status = RETURN_OK;
+  int i;
+  int gcount = group_counts[g];
+  const int *gidx = members + group_offsets[g];
+  double dx, dy;
+
+  if (gcount == 1) {
+    /* Singleton: delegate to single-source fitter */
+    int idx = gidx[0];
+    status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
+                         maxiter, &pflux[idx], &pfluxerr[idx], &pxfit[idx],
+                         &pyfit[idx], &pxerr[idx], &pyerr[idx], &pniter[idx],
+                         &pchi2[idx], &pflag[idx]);
+    return status;
+  }
+
+  /* Multi-member group: simultaneous fitting */
+  {
+    int npar = gcount * PSF_NA;
+    int width = psf->rw;
+    int height = psf->rh;
+    int64_t gxmin, gxmax, gymin, gymax;
+    int gw, gh, gnpix;
+    int iter, convflag;
+    double *gdata = NULL, *gweight = NULL;
+    double *gmat = NULL, *gsol = NULL, *gvmat = NULL, *gwmat = NULL;
+    double *gcovmat = NULL, *grv1 = NULL, *gtmp = NULL;
+    double *deltax_arr = NULL, *deltay_arr = NULL;
+    float **psfstamps = NULL;
+    converter convert, econvert, mconvert, sconvert;
+    int64_t sz, esz, msz, ssz;
+    int errisarray, errisstd;
+    double vp;
+    int alloc_ok = 1;
+
+    /* Compute group bounding box */
+    gxmin = (int64_t)im->w;
+    gxmax = 0;
+    gymin = (int64_t)im->h;
+    gymax = 0;
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      int64_t lxmin = (int64_t)(x[idx] + 0.5) - width / 2;
+      int64_t lxmax = lxmin + width;
+      int64_t lymin = (int64_t)(y[idx] + 0.5) - height / 2;
+      int64_t lymax = lymin + height;
+      if (lxmin < gxmin) gxmin = lxmin;
+      if (lxmax > gxmax) gxmax = lxmax;
+      if (lymin < gymin) gymin = lymin;
+      if (lymax > gymax) gymax = lymax;
+    }
+    if (gxmin < 0) gxmin = 0;
+    if (gymin < 0) gymin = 0;
+    if (gxmax > im->w) gxmax = im->w;
+    if (gymax > im->h) gymax = im->h;
+    gw = (int)(gxmax - gxmin);
+    gh = (int)(gymax - gymin);
+    gnpix = gw * gh;
+
+    if (gnpix < npar || gw <= 0 || gh <= 0) {
+      /* Group too small, fit individually */
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
+                             maxiter, &pflux[idx], &pfluxerr[idx], &pxfit[idx],
+                             &pyfit[idx], &pxerr[idx], &pyerr[idx], &pniter[idx],
+                             &pchi2[idx], &pflag[idx]);
+        if (status != RETURN_OK) return status;
+      }
+      return RETURN_OK;
+    }
+
+    /* Allocate group working arrays */
+    gdata = (double *)calloc((size_t)gnpix, sizeof(double));
+    gweight = (double *)calloc((size_t)gnpix, sizeof(double));
+    gmat = (double *)malloc((size_t)gnpix * npar * sizeof(double));
+    gsol = (double *)malloc((size_t)npar * sizeof(double));
+    gvmat = (double *)malloc((size_t)npar * npar * sizeof(double));
+    gwmat = (double *)malloc((size_t)npar * sizeof(double));
+    gcovmat = (double *)calloc((size_t)npar * npar, sizeof(double));
+    grv1 = (double *)malloc((size_t)npar * sizeof(double));
+    gtmp = (double *)malloc((size_t)npar * sizeof(double));
+    deltax_arr = (double *)calloc((size_t)gcount, sizeof(double));
+    deltay_arr = (double *)calloc((size_t)gcount, sizeof(double));
+    psfstamps = (float **)calloc((size_t)gcount, sizeof(float *));
+
+    if (!gdata || !gweight || !gmat || !gsol || !gvmat || !gwmat || !gcovmat ||
+        !grv1 || !gtmp || !deltax_arr || !deltay_arr || !psfstamps) {
+      alloc_ok = 0;
+    }
+
+    if (alloc_ok) {
+      for (i = 0; i < gcount; i++) {
+        psfstamps[i] = (float *)calloc((size_t)gw * gh, sizeof(float));
+        if (!psfstamps[i]) {
+          alloc_ok = 0;
+          break;
+        }
+      }
+    }
+
+    if (!alloc_ok) {
+      status = MEMORY_ALLOC_ERROR;
+      goto group_exit;
+    }
+
+    /* Get converters */
+    if ((status = get_converter(im->dtype, &convert, &sz))) goto group_exit;
+    errisarray = 0;
+    errisstd = 0;
+    vp = 1.0;
+    msz = 0;
+    ssz = 0;
+    esz = 0;
+    if (im->mask) {
+      if ((status = get_converter(im->mdtype, &mconvert, &msz))) goto group_exit;
+    }
+    if (im->segmap) {
+      if ((status = get_converter(im->sdtype, &sconvert, &ssz))) goto group_exit;
+    }
+    if (im->noise_type != SEP_NOISE_NONE) {
+      errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+      if (im->noise) {
+        errisarray = 1;
+        if ((status = get_converter(im->ndtype, &econvert, &esz)))
+          goto group_exit;
+      } else {
+        vp = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
+      }
+    }
+
+    /* Extract data and weights for group bounding box */
+    {
+      int64_t ix, iy;
+      int64_t pos2;
+      for (iy = gymin; iy < gymax; iy++) {
+        for (ix = gxmin; ix < gxmax; ix++) {
+          int pidx = (int)((iy - gymin) * gw + (ix - gxmin));
+          pos2 = iy * im->w + ix;
+          double pix_val = ((converter)convert)((const char *)im->data + pos2 * sz);
+          double var_val = vp;
+
+          /* Check mask */
+          if (im->mask) {
+            if (((converter)mconvert)((const char *)im->mask + pos2 * msz) >
+                im->maskthresh) {
+              gdata[pidx] = 0.0;
+              gweight[pidx] = 0.0;
+              continue;
+            }
+          }
+
+          /* Check segmap: mask pixel if it belongs to a source not in this group */
+          if (im->segmap) {
+            int segval =
+                (int)((converter)sconvert)((const char *)im->segmap + pos2 * ssz);
+            if (segval != 0) {
+              int in_group = 0;
+              int ki;
+              for (ki = 0; ki < gcount; ki++) {
+                if (id && segval == id[gidx[ki]]) {
+                  in_group = 1;
+                  break;
+                }
+              }
+              if (!in_group) {
+                gdata[pidx] = 0.0;
+                gweight[pidx] = 0.0;
+                continue;
+              }
+            }
+          }
+
+          if (errisarray) {
+            var_val = ((converter)econvert)((const char *)im->noise + pos2 * esz);
+            if (errisstd) var_val *= var_val;
+          }
+
+          if (var_val > 0.0) {
+            double total_var = var_val;
+            if (im->gain > 0.0 && pix_val > 0.0) {
+              total_var += pix_val / im->gain;
+            }
+            gweight[pidx] = 1.0 / sqrt(total_var);
+          } else {
+            gweight[pidx] = 0.0;
+          }
+          gdata[pidx] = pix_val * gweight[pidx];
+        }
+      }
+    }
+
+    /* Compute per-source flags by checking each source's stamp */
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      int cix = (int)(x[idx] + 0.5);
+      int ciy = (int)(y[idx] + 0.5);
+      int psy, psx;
+      for (psy = 0; psy < height; psy++) {
+        int64_t imy2 = ciy - height / 2 + psy;
+        for (psx = 0; psx < width; psx++) {
+          int64_t imx2 = cix - width / 2 + psx;
+          if (imy2 < 0 || imy2 >= im->h || imx2 < 0 || imx2 >= im->w) {
+            pflag[idx] |= SEP_APER_TRUNC;
+            continue;
+          }
+          int64_t pos2 = imy2 * im->w + imx2;
+          if (im->mask) {
+            if (((converter)mconvert)((const char *)im->mask + pos2 * msz) >
+                im->maskthresh) {
+              pflag[idx] |= SEP_APER_HASMASKED;
+            }
+          }
+          if (im->segmap) {
+            int segval =
+                (int)((converter)sconvert)((const char *)im->segmap + pos2 * ssz);
+            if (segval != 0 && (!id || segval != id[idx])) {
+              pflag[idx] |= SEP_APER_HASMASKED;
+            }
+          }
+        }
+      }
+    }
+
+    /* Iterative grouped fitting */
+    for (iter = 0; iter < maxiter; iter++) {
+      convflag = 0;
+
+      /* Build PSF stamps for each group member at current positions */
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        double cx = x[idx] + deltax_arr[i];
+        double cy = y[idx] + deltay_arr[i];
+        int cix = (int)(cx + 0.5);
+        int ciy = (int)(cy + 0.5);
+        double psfsum;
+
+        status = sep_psf_build(psf, cx, cy);
+        if (status != RETURN_OK) goto group_exit;
+        status = sep_psf_resample(psf, cx - cix, cy - ciy);
+        if (status != RETURN_OK) goto group_exit;
+
+        /* Normalize */
+        psfsum = 0.0;
+        {
+          int p;
+          for (p = 0; p < psf->rw * psf->rh; p++) psfsum += psf->resi[p];
+        }
+        if (psfsum > 0.0) {
+          int p;
+          for (p = 0; p < psf->rw * psf->rh; p++) psf->resi[p] /= (float)psfsum;
+        }
+
+        /* Place PSF stamp into group-sized buffer */
+        memset(psfstamps[i], 0, (size_t)gw * gh * sizeof(float));
+        {
+          int psy, psx;
+          for (psy = 0; psy < psf->rh; psy++) {
+            int64_t imy2 = ciy - psf->rh / 2 + psy;
+            if (imy2 < gymin || imy2 >= gymax) continue;
+            for (psx = 0; psx < psf->rw; psx++) {
+              int64_t imx2 = cix - psf->rw / 2 + psx;
+              if (imx2 < gxmin || imx2 >= gxmax) continue;
+              int gi = (int)((imy2 - gymin) * gw + (imx2 - gxmin));
+              psfstamps[i][gi] = psf->resi[psy * psf->rw + psx];
+            }
+          }
+        }
+      }
+
+      /* Build joint design matrix: 3 columns per member */
+      {
+        double *mp = gmat;
+        for (i = 0; i < gcount; i++) {
+          compute_gradient(psfstamps[i], gweight, gw, gh, mp);
+          mp += (size_t)gnpix * PSF_NA;
+        }
+      }
+
+      /* Solve via SVD */
+      status = svdfit(gmat, gdata, gnpix, npar, gsol, gvmat, gwmat, grv1, gtmp);
+      if (status != RETURN_OK) {
+        /* SVD failed, fall back to individual fits */
+        status = RETURN_OK;
+        for (i = 0; i < gcount; i++) {
+          int idx2 = gidx[i];
+          int fb_status = sep_psf_fit(
+              im, psf, x[idx2], y[idx2], id ? id[idx2] : 0, inflag, maxiter,
+              &pflux[idx2], &pfluxerr[idx2], &pxfit[idx2], &pyfit[idx2],
+              &pxerr[idx2], &pyerr[idx2], &pniter[idx2], &pchi2[idx2],
+              &pflag[idx2]);
+          if (fb_status != RETURN_OK) status = fb_status;
+        }
+        goto group_exit;
+      }
+
+      /* Update positions with damping for multi-component */
+      for (i = 0; i < gcount; i++) {
+        double fi = gsol[i * PSF_NA];
+        pflux[gidx[i]] = fi;
+        if (fabs(fi) > 0.0) {
+          /* Factor of 2 damping for multi-component (SExtractor convention) */
+          dx = -gsol[i * PSF_NA + 1] / (2.0 * fi);
+          dy = -gsol[i * PSF_NA + 2] / (2.0 * fi);
+        } else {
+          dx = 0.0;
+          dy = 0.0;
+        }
+        deltax_arr[i] += dx;
+        deltay_arr[i] += dy;
+
+        if (dx * dx + dy * dy > PSF_MINSHIFT * PSF_MINSHIFT) {
+          convflag = 1;
+        }
+      }
+
+      pniter[gidx[0]] = iter + 1;
+      if (!convflag) break;
+    }
+
+    /* Store final positions */
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      pxfit[idx] = x[idx] + deltax_arr[i];
+      pyfit[idx] = y[idx] + deltay_arr[i];
+      pniter[idx] = pniter[gidx[0]];
+    }
+
+    /* Compute covariance and extract errors */
+    status = svdvar(gvmat, gwmat, npar, gcovmat);
+    if (status == RETURN_OK) {
+      for (i = 0; i < gcount; i++) {
+        int idx = gidx[i];
+        int base = i * PSF_NA;
+        double var_f = gcovmat[base * npar + base];
+        if (var_f < 0.0) var_f = 0.0;
+        if (im->gain > 0.0 && pflux[idx] > 0.0) {
+          var_f += pflux[idx] / im->gain;
+        }
+        pfluxerr[idx] = sqrt(var_f);
+
+        if (fabs(pflux[idx]) > 0.0) {
+          double f2 = pflux[idx] * pflux[idx];
+          double vx = gcovmat[(base + 1) * npar + (base + 1)];
+          double vy = gcovmat[(base + 2) * npar + (base + 2)];
+          pxerr[idx] = sqrt(vx > 0.0 ? vx / f2 : 0.0);
+          pyerr[idx] = sqrt(vy > 0.0 ? vy / f2 : 0.0);
+        }
+      }
+    }
+
+  group_exit:
+    for (i = 0; i < gcount; i++) {
+      if (psfstamps) free(psfstamps[i]);
+    }
+    free(psfstamps);
+    free(gdata);
+    free(gweight);
+    free(gmat);
+    free(gsol);
+    free(gvmat);
+    free(gwmat);
+    free(gcovmat);
+    free(grv1);
+    free(gtmp);
+    free(deltax_arr);
+    free(deltay_arr);
+  }
+
+  return status;
+}
+
 /*==========================================================================*/
 /*                     Grouped PSF Fitting                                  */
 /*==========================================================================*/
@@ -1285,8 +1810,11 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
   int *parent = NULL, *rank_arr = NULL, *group_id = NULL, *root_map = NULL;
   int *group_counts = NULL, *group_offsets = NULL, *group_fill = NULL;
   int *members = NULL;
+  psf_xorder_entry *xorder = NULL;
+  psf_group_order_entry *group_order = NULL;
   int i, j, g, ngroups;
-  double half_stamp, rsum, dx, dy, dist2;
+  int has_multi;
+  double half_stamp, rsum, rsum2, dx, dy, dist2;
 
   if (n <= 0) return RETURN_OK;
   if (maxiter <= 0) maxiter = 20;
@@ -1315,25 +1843,40 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
   group_offsets = (int *)malloc((size_t)(n + 1) * sizeof(int));
   group_fill = (int *)malloc((size_t)n * sizeof(int));
   members = (int *)malloc((size_t)n * sizeof(int));
+  xorder = (psf_xorder_entry *)malloc((size_t)n * sizeof(psf_xorder_entry));
 
   if (!parent || !rank_arr || !group_id || !root_map || !group_counts ||
-      !group_offsets || !group_fill || !members) {
+      !group_offsets || !group_fill || !members || !xorder) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
   }
 
   /* Initialize union-find */
-  for (i = 0; i < n; i++) parent[i] = i;
-
-  /* Build groups based on stamp overlap */
   for (i = 0; i < n; i++) {
-    for (j = i + 1; j < n; j++) {
-      dx = x[i] - x[j];
-      dy = y[i] - y[j];
-      rsum = group_factor * (half_stamp + half_stamp);
-      dist2 = dx * dx + dy * dy;
-      if (dist2 <= rsum * rsum) {
-        psf_uf_union(parent, rank_arr, i, j);
+    parent[i] = i;
+    xorder[i].x = x[i];
+    xorder[i].idx = i;
+  }
+  qsort(xorder, (size_t)n, sizeof(psf_xorder_entry), psf_xorder_cmp);
+
+  /* Build groups based on stamp overlap.
+   * Sweep in x-order and only test pairs inside +/-rsum x-window. */
+  rsum = group_factor * (half_stamp + half_stamp);
+  rsum2 = rsum * rsum;
+  if (rsum > 0.0) {
+    for (i = 0; i < n; i++) {
+      int ii = xorder[i].idx;
+      double xi = xorder[i].x;
+      for (j = i + 1; j < n; j++) {
+        int jj = xorder[j].idx;
+        dx = xorder[j].x - xi;
+        if (dx > rsum) break;
+        dy = y[ii] - y[jj];
+        if (dy > rsum || dy < -rsum) continue;
+        dist2 = dx * dx + dy * dy;
+        if (dist2 <= rsum2) {
+          psf_uf_union(parent, rank_arr, ii, jj);
+        }
       }
     }
   }
@@ -1362,413 +1905,92 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
     members[group_fill[gid]++] = i;
   }
 
-  /* Process each group */
-  for (g = 0; g < ngroups; g++) {
-    int gcount = group_counts[g];
-    int *gidx = members + group_offsets[g];
-
-    if (gcount == 1) {
-      /* Singleton: delegate to single-source fitter */
-      int idx = gidx[0];
-      status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
-                           maxiter, &pflux[idx], &pfluxerr[idx], &pxfit[idx],
-                           &pyfit[idx], &pxerr[idx], &pyerr[idx], &pniter[idx],
-                           &pchi2[idx], &pflag[idx]);
-      if (status != RETURN_OK) goto cleanup;
-      continue;
-    }
-
-    /* Multi-member group: simultaneous fitting */
-    {
-      int npar = gcount * PSF_NA;
-      int width = psf->rw;
-      int height = psf->rh;
-      int64_t gxmin, gxmax, gymin, gymax;
-      int gw, gh, gnpix;
-      int iter, convflag;
-      double *gdata = NULL, *gweight = NULL;
-      double *gmat = NULL, *gsol = NULL, *gvmat = NULL, *gwmat = NULL;
-      double *gcovmat = NULL, *grv1 = NULL, *gtmp = NULL;
-      double *deltax_arr = NULL, *deltay_arr = NULL;
-      float **psfstamps = NULL;
-      converter convert, econvert, mconvert, sconvert;
-      int64_t sz, esz, msz, ssz;
-      int errisarray, errisstd;
-      double vp;
-      int alloc_ok = 1;
-
-      /* Compute group bounding box */
-      gxmin = (int64_t)im->w;
-      gxmax = 0;
-      gymin = (int64_t)im->h;
-      gymax = 0;
-      for (i = 0; i < gcount; i++) {
-        int idx = gidx[i];
-        int64_t lxmin = (int64_t)(x[idx] + 0.5) - width / 2;
-        int64_t lxmax = lxmin + width;
-        int64_t lymin = (int64_t)(y[idx] + 0.5) - height / 2;
-        int64_t lymax = lymin + height;
-        if (lxmin < gxmin) gxmin = lxmin;
-        if (lxmax > gxmax) gxmax = lxmax;
-        if (lymin < gymin) gymin = lymin;
-        if (lymax > gymax) gymax = lymax;
-      }
-      if (gxmin < 0) gxmin = 0;
-      if (gymin < 0) gymin = 0;
-      if (gxmax > im->w) gxmax = im->w;
-      if (gymax > im->h) gymax = im->h;
-      gw = (int)(gxmax - gxmin);
-      gh = (int)(gymax - gymin);
-      gnpix = gw * gh;
-
-      if (gnpix < npar || gw <= 0 || gh <= 0) {
-        /* Group too small, fit individually */
-        for (i = 0; i < gcount; i++) {
-          int idx = gidx[i];
-          status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0,
-                               inflag, maxiter, &pflux[idx], &pfluxerr[idx],
-                               &pxfit[idx], &pyfit[idx], &pxerr[idx],
-                               &pyerr[idx], &pniter[idx], &pchi2[idx],
-                               &pflag[idx]);
-          if (status != RETURN_OK) goto cleanup;
-        }
-        continue;
-      }
-
-      /* Allocate group working arrays */
-      gdata = (double *)calloc((size_t)gnpix, sizeof(double));
-      gweight = (double *)calloc((size_t)gnpix, sizeof(double));
-      gmat = (double *)malloc((size_t)gnpix * npar * sizeof(double));
-      gsol = (double *)malloc((size_t)npar * sizeof(double));
-      gvmat = (double *)malloc((size_t)npar * npar * sizeof(double));
-      gwmat = (double *)malloc((size_t)npar * sizeof(double));
-      gcovmat = (double *)calloc((size_t)npar * npar, sizeof(double));
-      grv1 = (double *)malloc((size_t)npar * sizeof(double));
-      gtmp = (double *)malloc((size_t)npar * sizeof(double));
-      deltax_arr = (double *)calloc((size_t)gcount, sizeof(double));
-      deltay_arr = (double *)calloc((size_t)gcount, sizeof(double));
-      psfstamps =
-          (float **)calloc((size_t)gcount, sizeof(float *));
-
-      if (!gdata || !gweight || !gmat || !gsol || !gvmat || !gwmat ||
-          !gcovmat || !grv1 || !gtmp || !deltax_arr || !deltay_arr ||
-          !psfstamps) {
-        alloc_ok = 0;
-      }
-
-      if (alloc_ok) {
-        for (i = 0; i < gcount; i++) {
-          psfstamps[i] = (float *)calloc((size_t)gw * gh, sizeof(float));
-          if (!psfstamps[i]) {
-            alloc_ok = 0;
-            break;
-          }
-        }
-      }
-
-      if (!alloc_ok) {
-        if (psfstamps) {
-          for (i = 0; i < gcount; i++) free(psfstamps[i]);
-        }
-        free(gdata);
-        free(gweight);
-        free(gmat);
-        free(gsol);
-        free(gvmat);
-        free(gwmat);
-        free(gcovmat);
-        free(grv1);
-        free(gtmp);
-        free(deltax_arr);
-        free(deltay_arr);
-        free(psfstamps);
-        status = MEMORY_ALLOC_ERROR;
-        goto cleanup;
-      }
-
-      /* Get converters */
-      if ((status = get_converter(im->dtype, &convert, &sz))) {
-        goto group_exit;
-      }
-      errisarray = 0;
-      errisstd = 0;
-      vp = 1.0;
-      msz = 0;
-      ssz = 0;
-      esz = 0;
-      if (im->mask) {
-        if ((status = get_converter(im->mdtype, &mconvert, &msz))) {
-          goto group_exit;
-        }
-      }
-      if (im->segmap) {
-        if ((status = get_converter(im->sdtype, &sconvert, &ssz))) {
-          goto group_exit;
-        }
-      }
-      if (im->noise_type != SEP_NOISE_NONE) {
-        errisstd = (im->noise_type == SEP_NOISE_STDDEV);
-        if (im->noise) {
-          errisarray = 1;
-          if ((status = get_converter(im->ndtype, &econvert, &esz))) {
-            goto group_exit;
-          }
-        } else {
-          vp = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
-        }
-      }
-
-      /* Extract data and weights for group bounding box */
-      {
-        int64_t ix, iy;
-        int64_t pos2;
-        for (iy = gymin; iy < gymax; iy++) {
-          for (ix = gxmin; ix < gxmax; ix++) {
-            int pidx = (int)((iy - gymin) * gw + (ix - gxmin));
-            pos2 = iy * im->w + ix;
-            double pix_val = ((converter)convert)(
-                (const char *)im->data + pos2 * sz);
-            double var_val = vp;
-
-            /* Check mask */
-            if (im->mask) {
-              if (((converter)mconvert)(
-                      (const char *)im->mask + pos2 * msz) >
-                  im->maskthresh) {
-                gdata[pidx] = 0.0;
-                gweight[pidx] = 0.0;
-                continue;
-              }
-            }
-
-            /* Check segmap: mask pixel if it belongs to a source
-             * not in this group */
-            if (im->segmap) {
-              int segval =
-                  (int)((converter)sconvert)(
-                      (const char *)im->segmap + pos2 * ssz);
-              if (segval != 0) {
-                int in_group = 0;
-                int ki;
-                for (ki = 0; ki < gcount; ki++) {
-                  if (id && segval == id[gidx[ki]]) {
-                    in_group = 1;
-                    break;
-                  }
-                }
-                if (!in_group) {
-                  gdata[pidx] = 0.0;
-                  gweight[pidx] = 0.0;
-                  continue;
-                }
-              }
-            }
-
-            if (errisarray) {
-              var_val = ((converter)econvert)(
-                  (const char *)im->noise + pos2 * esz);
-              if (errisstd) var_val *= var_val;
-            }
-
-            if (var_val > 0.0) {
-              double total_var = var_val;
-              if (im->gain > 0.0 && pix_val > 0.0) {
-                total_var += pix_val / im->gain;
-              }
-              gweight[pidx] = 1.0 / sqrt(total_var);
-            } else {
-              gweight[pidx] = 0.0;
-            }
-            gdata[pidx] = pix_val * gweight[pidx];
-          }
-        }
-      }
-
-      /* Compute per-source flags by checking each source's stamp */
-      for (i = 0; i < gcount; i++) {
-        int idx = gidx[i];
-        int cix = (int)(x[idx] + 0.5);
-        int ciy = (int)(y[idx] + 0.5);
-        int psy, psx;
-        for (psy = 0; psy < height; psy++) {
-          int64_t imy2 = ciy - height / 2 + psy;
-          for (psx = 0; psx < width; psx++) {
-            int64_t imx2 = cix - width / 2 + psx;
-            if (imy2 < 0 || imy2 >= im->h || imx2 < 0 || imx2 >= im->w) {
-              pflag[idx] |= SEP_APER_TRUNC;
-              continue;
-            }
-            int64_t pos2 = imy2 * im->w + imx2;
-            if (im->mask) {
-              if (((converter)mconvert)(
-                      (const char *)im->mask + pos2 * msz) >
-                  im->maskthresh) {
-                pflag[idx] |= SEP_APER_HASMASKED;
-              }
-            }
-            if (im->segmap) {
-              int segval =
-                  (int)((converter)sconvert)(
-                      (const char *)im->segmap + pos2 * ssz);
-              if (segval != 0 && (!id || segval != id[idx])) {
-                pflag[idx] |= SEP_APER_HASMASKED;
-              }
-            }
-          }
-        }
-      }
-
-      /* Iterative grouped fitting */
-      for (iter = 0; iter < maxiter; iter++) {
-        convflag = 0;
-
-        /* Build PSF stamps for each group member at current positions */
-        for (i = 0; i < gcount; i++) {
-          int idx = gidx[i];
-          double cx = x[idx] + deltax_arr[i];
-          double cy = y[idx] + deltay_arr[i];
-          int cix = (int)(cx + 0.5);
-          int ciy = (int)(cy + 0.5);
-          double psfsum;
-
-          status = sep_psf_build(psf, cx, cy);
-          if (status != RETURN_OK) goto group_exit;
-          status = sep_psf_resample(psf, cx - cix, cy - ciy);
-          if (status != RETURN_OK) goto group_exit;
-
-          /* Normalize */
-          psfsum = 0.0;
-          {
-            int p;
-            for (p = 0; p < psf->rw * psf->rh; p++) psfsum += psf->resi[p];
-          }
-          if (psfsum > 0.0) {
-            int p;
-            for (p = 0; p < psf->rw * psf->rh; p++)
-              psf->resi[p] /= (float)psfsum;
-          }
-
-          /* Place PSF stamp into group-sized buffer */
-          memset(psfstamps[i], 0, (size_t)gw * gh * sizeof(float));
-          {
-            int psy, psx;
-            for (psy = 0; psy < psf->rh; psy++) {
-              int64_t imy2 = ciy - psf->rh / 2 + psy;
-              if (imy2 < gymin || imy2 >= gymax) continue;
-              for (psx = 0; psx < psf->rw; psx++) {
-                int64_t imx2 = cix - psf->rw / 2 + psx;
-                if (imx2 < gxmin || imx2 >= gxmax) continue;
-                int gi = (int)((imy2 - gymin) * gw + (imx2 - gxmin));
-                psfstamps[i][gi] = psf->resi[psy * psf->rw + psx];
-              }
-            }
-          }
-        }
-
-        /* Build joint design matrix: 3 columns per member */
-        {
-          double *mp = gmat;
-          for (i = 0; i < gcount; i++) {
-            compute_gradient(psfstamps[i], gweight, gw, gh, mp);
-            mp += (size_t)gnpix * PSF_NA;
-          }
-        }
-
-        /* Solve via SVD */
-        status = svdfit(gmat, gdata, gnpix, npar, gsol, gvmat, gwmat, grv1,
-                        gtmp);
-        if (status != RETURN_OK) {
-          /* SVD failed, fall back to individual fits */
-          status = RETURN_OK;
-          for (i = 0; i < gcount; i++) {
-            int idx2 = gidx[i];
-            int fb_status = sep_psf_fit(
-                im, psf, x[idx2], y[idx2], id ? id[idx2] : 0, inflag,
-                maxiter, &pflux[idx2], &pfluxerr[idx2], &pxfit[idx2],
-                &pyfit[idx2], &pxerr[idx2], &pyerr[idx2],
-                &pniter[idx2], &pchi2[idx2], &pflag[idx2]);
-            if (fb_status != RETURN_OK) status = fb_status;
-          }
-          goto group_exit;
-        }
-
-        /* Update positions with damping for multi-component */
-        for (i = 0; i < gcount; i++) {
-          double fi = gsol[i * PSF_NA];
-          pflux[gidx[i]] = fi;
-          if (fabs(fi) > 0.0) {
-            /* Factor of 2 damping for multi-component (SExtractor convention) */
-            dx = -gsol[i * PSF_NA + 1] / (2.0 * fi);
-            dy = -gsol[i * PSF_NA + 2] / (2.0 * fi);
-          } else {
-            dx = 0.0;
-            dy = 0.0;
-          }
-          deltax_arr[i] += dx;
-          deltay_arr[i] += dy;
-
-          if (dx * dx + dy * dy > PSF_MINSHIFT * PSF_MINSHIFT) {
-            convflag = 1;
-          }
-        }
-
-        pniter[gidx[0]] = iter + 1;
-        if (!convflag) break;
-      }
-
-      /* Store final positions */
-      for (i = 0; i < gcount; i++) {
-        int idx = gidx[i];
-        pxfit[idx] = x[idx] + deltax_arr[i];
-        pyfit[idx] = y[idx] + deltay_arr[i];
-        pniter[idx] = pniter[gidx[0]];
-      }
-
-      /* Compute covariance and extract errors */
-      status = svdvar(gvmat, gwmat, npar, gcovmat);
-      if (status == RETURN_OK) {
-        for (i = 0; i < gcount; i++) {
-          int idx = gidx[i];
-          int base = i * PSF_NA;
-          double var_f = gcovmat[base * npar + base];
-          if (var_f < 0.0) var_f = 0.0;
-          if (im->gain > 0.0 && pflux[idx] > 0.0) {
-            var_f += pflux[idx] / im->gain;
-          }
-          pfluxerr[idx] = sqrt(var_f);
-
-          if (fabs(pflux[idx]) > 0.0) {
-            double f2 = pflux[idx] * pflux[idx];
-            double vx = gcovmat[(base + 1) * npar + (base + 1)];
-            double vy = gcovmat[(base + 2) * npar + (base + 2)];
-            pxerr[idx] = sqrt(vx > 0.0 ? vx / f2 : 0.0);
-            pyerr[idx] = sqrt(vy > 0.0 ? vy / f2 : 0.0);
-          }
-        }
-      }
-
-    group_exit:
-      for (i = 0; i < gcount; i++) {
-        if (psfstamps) free(psfstamps[i]);
-      }
-      free(psfstamps);
-      free(gdata);
-      free(gweight);
-      free(gmat);
-      free(gsol);
-      free(gvmat);
-      free(gwmat);
-      free(gcovmat);
-      free(grv1);
-      free(gtmp);
-      free(deltax_arr);
-      free(deltay_arr);
-
-      if (status != RETURN_OK) goto cleanup;
+  has_multi = 0;
+  for (i = 0; i < ngroups; i++) {
+    if (group_counts[i] > 1) {
+      has_multi = 1;
+      break;
     }
   }
 
+  if (!has_multi) {
+    status = sep_psf_fit_array(im, psf, x, y, n, id, inflag, maxiter, pflux,
+                               pfluxerr, pxfit, pyfit, pxerr, pyerr, pniter,
+                               pchi2, pflag);
+    goto cleanup;
+  }
+
+  group_order =
+      (psf_group_order_entry *)malloc((size_t)ngroups * sizeof(*group_order));
+  if (!group_order) {
+    status = MEMORY_ALLOC_ERROR;
+    goto cleanup;
+  }
+  for (i = 0; i < ngroups; i++) {
+    group_order[i].gid = i;
+    group_order[i].count = group_counts[i];
+  }
+  qsort(group_order, (size_t)ngroups, sizeof(*group_order),
+        psf_group_order_cmp);
+
+  /* Process each group */
+#ifdef _OPENMP
+  {
+    int first_status = RETURN_OK;
+
+#pragma omp parallel
+    {
+      sep_psf local_psf;
+      sep_psf *work_psf = psf;
+      int ws_status = psf_workspace_clone(psf, &local_psf);
+
+      if (ws_status == RETURN_OK) {
+        work_psf = &local_psf;
+      } else {
+#pragma omp critical(psf_multi_status)
+        {
+          if (first_status == RETURN_OK) first_status = ws_status;
+        }
+      }
+
+#pragma omp for schedule(dynamic, 1)
+      for (int go = 0; go < ngroups; go++) {
+        int gid = group_order[go].gid;
+        int gstatus;
+        if (ws_status != RETURN_OK) continue;
+        gstatus = psf_fit_group(im, work_psf, x, y, id, inflag, maxiter,
+                                group_counts, group_offsets, members, gid,
+                                pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr,
+                                pniter, pchi2, pflag);
+        if (gstatus != RETURN_OK) {
+#pragma omp critical(psf_multi_status)
+          {
+            if (first_status == RETURN_OK) first_status = gstatus;
+          }
+        }
+      }
+
+      psf_workspace_free(&local_psf);
+    }
+
+    if (first_status != RETURN_OK) {
+      status = first_status;
+      goto cleanup;
+    }
+  }
+#else
+  for (i = 0; i < ngroups; i++) {
+    g = group_order[i].gid;
+    status = psf_fit_group(im, psf, x, y, id, inflag, maxiter, group_counts,
+                           group_offsets, members, g, pflux, pfluxerr, pxfit,
+                           pyfit, pxerr, pyerr, pniter, pchi2, pflag);
+    if (status != RETURN_OK) goto cleanup;
+  }
+#endif
+
 cleanup:
+  free(group_order);
+  free(xorder);
   free(parent);
   free(rank_arr);
   free(group_id);

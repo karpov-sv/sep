@@ -53,10 +53,26 @@ CC?=gcc
 AR?=ar
 CPPFLAGS ?=
 LDFLAGS ?=
+OPENMP ?= 0
+
+OMP_CFLAGS :=
+OMP_LDFLAGS :=
+ifeq ($(OPENMP),1)
+ifeq ($(OS),darwin)
+OMP_PREFIX ?= /opt/local
+OMP_CFLAGS = -Xpreprocessor -fopenmp -I$(OMP_PREFIX)/include/libomp
+OMP_LDFLAGS = -L$(OMP_PREFIX)/lib/libomp -lomp
+else
+OMP_CFLAGS = -fopenmp
+OMP_LDFLAGS = -fopenmp
+endif
+endif
 
 CPPFLAGS += -Isrc
 CFLAGS += -Wall -Wextra -Wcast-qual -O3 -fvisibility=hidden  # -Werror
 CFLAGS += -DSEP_VERSION_STRING=\"$(MAJOR).$(MINOR).$(CURRENT_MICRO)\"
+CFLAGS += $(OMP_CFLAGS)
+LDFLAGS += $(OMP_LDFLAGS)
 CFLAGS_LIB = $(CFLAGS) -fPIC
 LDFLAGS_LIB = $(LDFLAGS) -shared -Wl,$(SONAME_FLAG),$(SONAME_MAJOR)
 

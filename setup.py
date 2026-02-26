@@ -10,6 +10,42 @@ from setuptools_scm import ScmVersion, get_version
 from setuptools_scm.version import guess_next_version
 
 
+def _detect_openmp_flags():
+
+    if os.environ.get("SEP_USE_OPENMP", "0").lower() not in ("1", "true", "yes"):
+        return [], []
+
+    if sys.platform == "darwin":
+        prefixes = ["/opt/local", "/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"]
+        for prefix in prefixes:
+            include_dirs = [
+                os.path.join(prefix, "include", "libomp"),
+                os.path.join(prefix, "include"),
+            ]
+            lib_dirs = [
+                os.path.join(prefix, "lib", "libomp"),
+                os.path.join(prefix, "lib"),
+            ]
+            for inc in include_dirs:
+                if not os.path.isfile(os.path.join(inc, "omp.h")):
+                    continue
+                for lib in lib_dirs:
+                    if (
+                        os.path.isfile(os.path.join(lib, "libomp.dylib"))
+                        or os.path.isfile(os.path.join(lib, "libomp.a"))
+                    ):
+                        return (
+                            ["-Xpreprocessor", "-fopenmp", f"-I{inc}"],
+                            [f"-L{lib}", "-lomp"],
+                        )
+        return [], []
+
+    if sys.platform.startswith("linux"):
+        return ["-fopenmp"], ["-fopenmp"]
+
+    return [], []
+
+
 def _new_version_scheme(version: ScmVersion) -> str:
 
     return version.format_next_version(guess_next_version, "{guessed}-dev{distance}")
@@ -49,6 +85,7 @@ else:
     sourcefiles = ["sep.pyx"] + glob(os.path.join("src", "*.c"))
     headerfiles = glob(os.path.join("src", "*.h"))
     include_dirs = [numpy.get_include(), "src"]
+    omp_compile_args, omp_link_args = _detect_openmp_flags()
     extensions = [
         Extension(
             "sep",
@@ -59,7 +96,9 @@ else:
                 ("_USE_MATH_DEFINES", "1"),
                 ("NPY_NO_DEPRECATED_API", "NPY_2_0_API_VERSION"),
             ],
-            extra_compile_args=['-DSEP_VERSION_STRING="' + c_version_string + '"'],
+            extra_compile_args=['-DSEP_VERSION_STRING="' + c_version_string + '"']
+            + omp_compile_args,
+            extra_link_args=omp_link_args,
         )
     ]
     extensions = cythonize(
