@@ -109,6 +109,52 @@ typedef struct {
   float * dsigma;
 } sep_bkg;
 
+/* sep_psf
+ *
+ * Represents a spatially varying PSF model as a polynomial expansion
+ * over a set of supersampled component images (e.g., from PSFEx).
+ * The local PSF at image position (x, y) is:
+ *   PSF = sum_k coeff_k(x,y) * component_k
+ * where the coefficients are a 2D polynomial of given degree.
+ */
+typedef struct {
+  int w, h; /* supersampled PSF stamp dimensions */
+  int ncomp; /* number of polynomial components */
+  int degree; /* polynomial degree for spatial variation */
+  double x0, y0; /* context normalization offsets */
+  double sx, sy; /* context normalization scales */
+  float pixstep; /* PSF sampling step (image_pix / psf_pix) */
+  double fwhm; /* typical PSF FWHM in image pixels */
+  float * data; /* component images: ncomp * h * w (owned) */
+  float * loc; /* workspace: local supersampled PSF, h * w */
+  float * resi; /* workspace: resampled native-res stamp */
+  int rw, rh; /* dimensions of native-resolution stamp */
+
+  /* Pre-allocated resampling workspace */
+  float * interp_mask; /* interpolation kernel weights */
+  int * interp_nmask; /* kernel width per output pixel */
+  int * interp_start; /* start index per output pixel */
+  float * interp_buf; /* intermediate x-resampled buffer */
+  int interp_mask_len; /* allocated length of interp_mask */
+  int interp_nmask_len; /* allocated length of nmask/start */
+  int interp_buf_len; /* allocated length of interp_buf */
+
+  /* Pre-computed Lanczos interpolation kernel LUT */
+  float * interp_lut; /* lookup table for Lanczos kernel */
+  int interp_lut_size; /* number of entries */
+
+  /* Pre-allocated fitting workspace (PSF_NA=3 params, rw*rh pixels) */
+  double * fit_mat; /* npix * PSF_NA */
+  double * fit_dvec; /* npix */
+  double * fit_weight; /* npix */
+  double * fit_sol; /* PSF_NA */
+  double * fit_vmat; /* PSF_NA * PSF_NA */
+  double * fit_wmat; /* PSF_NA */
+  double * fit_covmat; /* PSF_NA * PSF_NA */
+  double * svd_rv1; /* PSF_NA (for svdfit) */
+  double * svd_tmp; /* PSF_NA (for svdfit) */
+} sep_psf;
+
 /* sep_catalog
  *
  * The result of sep_extract(). This is a struct of arrays. Each array has
@@ -585,6 +631,153 @@ SEP_API int sep_windowed(
     short * flag
 );
 
+
+/*--------------------------- PSF photometry --------------------------------*/
+
+/* sep_psf_create()
+ *
+ * Create a PSF model from polynomial component images.
+ *
+ * data:    Component images, ncomp * h * w floats (row-major, copied).
+ * w, h:    Dimensions of each component image (supersampled pixels).
+ * ncomp:   Number of polynomial components.
+ * degree:  Polynomial degree for spatial variation.
+ * x0, y0:  Context normalization offsets (image coordinates).
+ * sx, sy:  Context normalization scales.
+ * pixstep: PSF pixel size in image pixels (< 1 means supersampled).
+ * fwhm:    Typical PSF FWHM in image pixels.
+ */
+SEP_API int sep_psf_create(
+    sep_psf ** psf,
+    const float * data,
+    int w,
+    int h,
+    int ncomp,
+    int degree,
+    double x0,
+    double y0,
+    double sx,
+    double sy,
+    float pixstep,
+    double fwhm
+);
+
+/* sep_psf_free()
+ *
+ * Free memory associated with a PSF model.
+ */
+SEP_API void sep_psf_free(sep_psf * psf);
+
+/* sep_psf_build()
+ *
+ * Evaluate the local supersampled PSF at image position (x, y).
+ * Result is stored in psf->loc.
+ */
+SEP_API int sep_psf_build(sep_psf * psf, double x, double y);
+
+/* sep_psf_resample()
+ *
+ * Shift and downsample the local PSF (psf->loc) to native image pixels
+ * with a sub-pixel offset (dx, dy). Result in psf->resi.
+ */
+SEP_API int sep_psf_resample(sep_psf * psf, double dx, double dy);
+
+/* sep_sum_psf()
+ *
+ * PSF flux photometry at a fixed position. Uses optimal extraction
+ * with the PSF model as weights: F = sum(P*D/V) / sum(P^2/V).
+ */
+SEP_API int sep_sum_psf(
+    const sep_image * im,
+    sep_psf * psf,
+    double x,
+    double y,
+    int id,
+    short inflag,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+);
+
+/* sep_psf_fit()
+ *
+ * Iterative PSF fitting for a single source. Fits flux and position
+ * simultaneously using linearized least-squares (SVD).
+ *
+ * Returns fitted flux, position, their errors, iteration count, and chi^2.
+ */
+SEP_API int sep_psf_fit(
+    const sep_image * im,
+    sep_psf * psf,
+    double x,
+    double y,
+    int id,
+    short inflag,
+    int maxiter,
+    double * flux,
+    double * fluxerr,
+    double * xfit,
+    double * yfit,
+    double * xerr,
+    double * yerr,
+    int * niter,
+    double * chi2,
+    short * flag
+);
+
+/* sep_psf_fit_array()
+ *
+ * Batch PSF fitting for multiple independent sources. Loops over sources
+ * in C to avoid Python loop overhead. Each source is fitted individually.
+ */
+SEP_API int sep_psf_fit_array(
+    const sep_image * im,
+    sep_psf * psf,
+    const double * x,
+    const double * y,
+    int64_t n,
+    const int * id,
+    short inflag,
+    int maxiter,
+    double * flux,
+    double * fluxerr,
+    double * xfit,
+    double * yfit,
+    double * xerr,
+    double * yerr,
+    int * niter,
+    double * chi2,
+    short * flag
+);
+
+/* sep_psf_fit_multi()
+ *
+ * Grouped PSF fitting for multiple sources. Sources whose stamps overlap
+ * are fitted simultaneously. Uses union-find grouping.
+ */
+SEP_API int sep_psf_fit_multi(
+    const sep_image * im,
+    sep_psf * psf,
+    const double * x,
+    const double * y,
+    int64_t n,
+    const int * id,
+    double group_factor,
+    short inflag,
+    int maxiter,
+    double * flux,
+    double * fluxerr,
+    double * xfit,
+    double * yfit,
+    double * xerr,
+    double * yerr,
+    int * niter,
+    double * chi2,
+    short * flag
+);
+
+/*--------------------------- utility functions -----------------------------*/
 
 /* sep_set_ellipse()
  *

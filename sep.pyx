@@ -258,6 +258,52 @@ cdef extern from "sep.h":
     void sep_set_sub_object_limit(int val)
     int sep_get_sub_object_limit()
 
+    ctypedef struct sep_psf:
+        int w, h
+        int ncomp
+        int degree
+        double x0, y0
+        double sx, sy
+        float pixstep
+        double fwhm
+        float *data
+        float *loc
+        float *resi
+        int rw, rh
+
+    int sep_psf_create(sep_psf **psf,
+                       const float *data, int w, int h, int ncomp,
+                       int degree, double x0, double y0, double sx, double sy,
+                       float pixstep, double fwhm)
+    void sep_psf_free(sep_psf *psf)
+    int sep_psf_build(sep_psf *psf, double x, double y)
+    int sep_psf_resample(sep_psf *psf, double dx, double dy)
+    int sep_sum_psf(const sep_image *im, sep_psf *psf,
+                    double x, double y, int id, short inflag,
+                    double *sum, double *sumerr, double *area, short *flag)
+    int sep_psf_fit(const sep_image *im, sep_psf *psf,
+                    double x, double y, int id, short inflag, int maxiter,
+                    double *flux, double *fluxerr,
+                    double *xfit, double *yfit,
+                    double *xerr, double *yerr,
+                    int *niter, double *chi2, short *flag)
+    int sep_psf_fit_array(const sep_image *im, sep_psf *psf,
+                          const double *x, const double *y, np.int64_t n,
+                          const int *id,
+                          short inflag, int maxiter,
+                          double *flux, double *fluxerr,
+                          double *xfit, double *yfit,
+                          double *xerr, double *yerr,
+                          int *niter, double *chi2, short *flag)
+    int sep_psf_fit_multi(const sep_image *im, sep_psf *psf,
+                          const double *x, const double *y, np.int64_t n,
+                          const int *id, double group_factor,
+                          short inflag, int maxiter,
+                          double *flux, double *fluxerr,
+                          double *xfit, double *yfit,
+                          double *xerr, double *yerr,
+                          int *niter, double *chi2, short *flag)
+
     void sep_get_errmsg(int status, char *errtext)
     void sep_get_errdetail(char *errtext)
 
@@ -2897,3 +2943,383 @@ def get_sub_object_limit():
     Get the limit on the number of sub-objects when deblending in extract().
     """
     return sep_get_sub_object_limit()
+
+# -----------------------------------------------------------------------------
+# PSF photometry
+
+cdef class PSF:
+    """PSF(data, sampling=1.0, degree=0, x0=0.0, y0=0.0, sx=1.0, sy=1.0, fwhm=0.0)
+
+    Represents a spatially varying PSF model as a polynomial expansion
+    over supersampled component images (e.g., from PSFEx).
+
+    Parameters
+    ----------
+    data : `~numpy.ndarray`
+        Polynomial basis component images. Shape ``(ncomp, h, w)`` or
+        ``(h, w)`` for a single constant component.
+    sampling : float, optional
+        PSF pixel size in image pixels. Values < 1 mean the PSF is
+        supersampled (default 1.0).
+    degree : int, optional
+        Polynomial degree for spatial variation (default 0 = constant).
+    x0, y0 : float, optional
+        Context normalization offsets (image coordinates).
+    sx, sy : float, optional
+        Context normalization scales.
+    fwhm : float, optional
+        Typical PSF FWHM in image pixels.
+    """
+
+    cdef sep_psf *ptr
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def __cinit__(self, np.ndarray data not None,
+                  double sampling=1.0, int degree=0,
+                  double x0=0.0, double y0=0.0,
+                  double sx=1.0, double sy=1.0,
+                  double fwhm=0.0):
+        cdef int status
+        cdef np.ndarray[float, ndim=3, mode='c'] darr
+
+        if data.ndim == 2:
+            data = data[np.newaxis, :, :]
+        if data.ndim != 3:
+            raise ValueError("data must be 2-d or 3-d array")
+
+        darr = np.ascontiguousarray(data, dtype=np.float32)
+
+        status = sep_psf_create(&self.ptr,
+                                <float*>darr.data,
+                                darr.shape[2], darr.shape[1], darr.shape[0],
+                                degree, x0, y0, sx, sy,
+                                <float>sampling, fwhm)
+        _assert_ok(status)
+
+    def __init__(self, np.ndarray data not None,
+                 double sampling=1.0, int degree=0,
+                 double x0=0.0, double y0=0.0,
+                 double sx=1.0, double sy=1.0,
+                 double fwhm=0.0):
+        pass
+
+    def __dealloc__(self):
+        if self.ptr is not NULL:
+            sep_psf_free(self.ptr)
+
+    property width:
+        """Supersampled PSF stamp width."""
+        def __get__(self):
+            return self.ptr.w
+
+    property height:
+        """Supersampled PSF stamp height."""
+        def __get__(self):
+            return self.ptr.h
+
+    property ncomp:
+        """Number of polynomial components."""
+        def __get__(self):
+            return self.ptr.ncomp
+
+    property degree:
+        """Polynomial degree for spatial variation."""
+        def __get__(self):
+            return self.ptr.degree
+
+    property sampling:
+        """PSF sampling step (image pixels per PSF pixel)."""
+        def __get__(self):
+            return self.ptr.pixstep
+
+    property fwhm:
+        """Typical PSF FWHM in image pixels."""
+        def __get__(self):
+            return self.ptr.fwhm
+
+    property stamp_width:
+        """Native-resolution stamp width."""
+        def __get__(self):
+            return self.ptr.rw
+
+    property stamp_height:
+        """Native-resolution stamp height."""
+        def __get__(self):
+            return self.ptr.rh
+
+    @classmethod
+    def from_gaussian(cls, double fwhm, int size=0, int oversampling=2):
+        """Create a PSF model from a circular Gaussian profile.
+
+        Parameters
+        ----------
+        fwhm : float
+            Full width at half maximum in image pixels.
+        size : int, optional
+            Stamp size in native image pixels. If 0 (default), set to
+            ``int(ceil(4 * fwhm)) | 1`` (nearest odd number).
+        oversampling : int, optional
+            Oversampling factor (default 2).
+
+        Returns
+        -------
+        PSF
+        """
+        if size <= 0:
+            size = int(np.ceil(4.0 * fwhm))
+            if size % 2 == 0:
+                size += 1
+
+        ossize = size * oversampling
+        sigma = fwhm / 2.354820045
+        sigma_os = sigma * oversampling
+
+        y, x = np.mgrid[0:ossize, 0:ossize]
+        cx = ossize // 2
+        cy = ossize // 2
+        stamp = np.exp(-((x - cx)**2 + (y - cy)**2) / (2.0 * sigma_os**2))
+        stamp = stamp / stamp.sum()
+        data = stamp[np.newaxis, :, :].astype(np.float32)
+
+        return cls(data, sampling=1.0 / oversampling, degree=0, fwhm=fwhm)
+
+    @classmethod
+    def from_psfex(cls, filename):
+        """Load a PSF model from a PSFEx ``.psf`` file.
+
+        Parameters
+        ----------
+        filename : str
+            Path to PSFEx output file.
+
+        Returns
+        -------
+        PSF
+        """
+        from astropy.io import fits
+
+        hdu = fits.open(filename)
+        header = hdu[1].header
+        data = hdu[1].data[0][0]
+        hdu.close()
+
+        w = header.get('PSFAXIS1')
+        h = header.get('PSFAXIS2')
+        degree = header.get('POLDEG1', 0)
+        x0 = header.get('POLZERO1', 0.0)
+        sx = header.get('POLSCAL1', 1.0)
+        y0 = header.get('POLZERO2', 0.0)
+        sy = header.get('POLSCAL2', 1.0)
+        sampling = header.get('PSF_SAMP', 1.0)
+        fwhm = header.get('PSF_FWHM', 0.0)
+
+        return cls(np.ascontiguousarray(data, dtype=np.float32),
+                   sampling=sampling, degree=degree,
+                   x0=x0, y0=y0, sx=sx, sy=sy, fwhm=fwhm)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
+            var=None, err=None, gain=None, np.ndarray mask=None,
+            double maskthresh=0.0,
+            seg_id=None, np.ndarray segmap=None,
+            bint grouped=False, double group_factor=2.0,
+            int maxiter=20, bint fit_positions=True):
+    """psf_fit(data, x, y, psf, ...)
+
+    Fit a PSF model to sources in image data.
+
+    Parameters
+    ----------
+    data : `~numpy.ndarray`
+        2-d array to fit.
+    x, y : array_like
+        Initial source positions.
+    psf : `PSF`
+        PSF model.
+    var : float or `~numpy.ndarray`, optional
+        Variance (scalar or 2-d array). Mutually exclusive with ``err``.
+    err : float or `~numpy.ndarray`, optional
+        Standard deviation (scalar or 2-d array). Mutually exclusive
+        with ``var``.
+    gain : float, optional
+        Effective gain in electrons per data unit.
+    mask : `~numpy.ndarray`, optional
+        Mask array.
+    maskthresh : float, optional
+        Mask threshold.
+    seg_id : array_like, optional
+        Segmentation IDs.
+    segmap : `~numpy.ndarray`, optional
+        Segmentation map.
+    grouped : bool, optional
+        If True, fit overlapping sources simultaneously (default False).
+    group_factor : float, optional
+        Grouping radius factor (default 2.0).
+    maxiter : int, optional
+        Maximum fitting iterations (default 20).
+    fit_positions : bool, optional
+        If True, fit positions as well as fluxes (default True).
+
+    Returns
+    -------
+    flux : `~numpy.ndarray`
+        Fitted flux for each source.
+    fluxerr : `~numpy.ndarray`
+        Flux error.
+    xfit : `~numpy.ndarray`
+        Fitted x position (same as input x if ``fit_positions=False``).
+    yfit : `~numpy.ndarray`
+        Fitted y position.
+    flag : `~numpy.ndarray`
+        Flags.
+    """
+
+    cdef int status
+    cdef sep_image im
+    cdef double area1
+    cdef double xerr1, yerr1, chi2_1
+    cdef int niter1
+    cdef np.int64_t npts
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] gx, gy
+    cdef np.ndarray[np.int32_t, ndim=1, mode="c"] gid
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] gflux, gfluxerr
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] gxfit, gyfit
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] gxerr, gyerr, gchi2
+    cdef np.ndarray[np.int32_t, ndim=1, mode="c"] gniter
+    cdef np.ndarray[np.int16_t, ndim=1, mode="c"] gflag
+
+    _parse_arrays(data, err, var, mask, segmap, &im)
+    im.maskthresh = maskthresh
+
+    if gain is not None:
+        im.gain = gain
+
+    # Coerce coordinate inputs to correct dtypes for safe pointer casts
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if seg_id is None:
+        seg_id = np.zeros(1, dtype=np.intc)
+    else:
+        seg_id = np.asarray(seg_id, dtype=np.intc)
+
+    dt = np.float64
+    shape = np.broadcast(x, y).shape
+
+    if not fit_positions:
+        # Flux-only mode: use sep_sum_psf
+        oflux = np.empty(shape, dt)
+        ofluxerr = np.empty(shape, dt)
+        oflag = np.empty(shape, np.short)
+        oxfit = np.broadcast_to(x, shape).copy().astype(dt)
+        oyfit = np.broadcast_to(y, shape).copy().astype(dt)
+
+        it = np.broadcast(x, y, seg_id, oflux, ofluxerr, oflag)
+        while np.PyArray_MultiIter_NOTDONE(it):
+            status = sep_sum_psf(
+                &im, psf.ptr,
+                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                (<int*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                0,
+                <double*>np.PyArray_MultiIter_DATA(it, 3),
+                <double*>np.PyArray_MultiIter_DATA(it, 4),
+                &area1,
+                <short*>np.PyArray_MultiIter_DATA(it, 5))
+            _assert_ok(status)
+            np.PyArray_MultiIter_NEXT(it)
+
+        return oflux, ofluxerr, oxfit, oyfit, oflag
+
+    if grouped:
+        # Grouped path: flatten arrays, call multi
+        gx = np.ascontiguousarray(
+            np.broadcast_to(x, shape).ravel(), dtype=np.float64)
+        gy = np.ascontiguousarray(
+            np.broadcast_to(y, shape).ravel(), dtype=np.float64)
+        gid = np.ascontiguousarray(
+            np.broadcast_to(seg_id, shape).ravel(), dtype=np.intc)
+
+        npts = gx.shape[0]
+        gflux = np.empty(npts, dtype=np.float64)
+        gfluxerr = np.empty(npts, dtype=np.float64)
+        gxfit = np.empty(npts, dtype=np.float64)
+        gyfit = np.empty(npts, dtype=np.float64)
+        gxerr = np.empty(npts, dtype=np.float64)
+        gyerr = np.empty(npts, dtype=np.float64)
+        gniter = np.empty(npts, dtype=np.intc)
+        gchi2 = np.empty(npts, dtype=np.float64)
+        gflag = np.empty(npts, dtype=np.int16)
+
+        status = sep_psf_fit_multi(
+            &im, psf.ptr,
+            <double*>gx.data,
+            <double*>gy.data,
+            npts,
+            <int*>gid.data,
+            group_factor,
+            0, maxiter,
+            <double*>gflux.data,
+            <double*>gfluxerr.data,
+            <double*>gxfit.data,
+            <double*>gyfit.data,
+            <double*>gxerr.data,
+            <double*>gyerr.data,
+            <int*>gniter.data,
+            <double*>gchi2.data,
+            <short*>gflag.data)
+        _assert_ok(status)
+
+        return (np.asarray(gflux).reshape(shape),
+                np.asarray(gfluxerr).reshape(shape),
+                np.asarray(gxfit).reshape(shape),
+                np.asarray(gyfit).reshape(shape),
+                np.asarray(gflag).astype(np.short).reshape(shape))
+
+    else:
+        # Non-grouped: batch call to C loop
+        # Use atleast_1d to handle scalar shape (shape=())
+        ashape = shape if len(shape) > 0 else (1,)
+        gx = np.ascontiguousarray(
+            np.broadcast_to(x, ashape).ravel(), dtype=np.float64)
+        gy = np.ascontiguousarray(
+            np.broadcast_to(y, ashape).ravel(), dtype=np.float64)
+        gid = np.ascontiguousarray(
+            np.broadcast_to(seg_id, ashape).ravel(), dtype=np.intc)
+
+        npts = gx.shape[0]
+        gflux = np.empty(npts, dtype=np.float64)
+        gfluxerr = np.empty(npts, dtype=np.float64)
+        gxfit = np.empty(npts, dtype=np.float64)
+        gyfit = np.empty(npts, dtype=np.float64)
+        gxerr = np.empty(npts, dtype=np.float64)
+        gyerr = np.empty(npts, dtype=np.float64)
+        gniter = np.empty(npts, dtype=np.intc)
+        gchi2 = np.empty(npts, dtype=np.float64)
+        gflag = np.empty(npts, dtype=np.int16)
+
+        status = sep_psf_fit_array(
+            &im, psf.ptr,
+            <double*>gx.data,
+            <double*>gy.data,
+            npts,
+            <int*>gid.data,
+            0, maxiter,
+            <double*>gflux.data,
+            <double*>gfluxerr.data,
+            <double*>gxfit.data,
+            <double*>gyfit.data,
+            <double*>gxerr.data,
+            <double*>gyerr.data,
+            <int*>gniter.data,
+            <double*>gchi2.data,
+            <short*>gflag.data)
+        _assert_ok(status)
+
+        return (np.asarray(gflux).reshape(shape),
+                np.asarray(gfluxerr).reshape(shape),
+                np.asarray(gxfit).reshape(shape),
+                np.asarray(gyfit).reshape(shape),
+                np.asarray(gflag).astype(np.short).reshape(shape))

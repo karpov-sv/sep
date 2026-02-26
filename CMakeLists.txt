@@ -13,6 +13,7 @@ set(SOURCES
    ${CMAKE_SOURCE_DIR}/src/lutz.c
    ${CMAKE_SOURCE_DIR}/src/aperture.c
    ${CMAKE_SOURCE_DIR}/src/background.c
+   ${CMAKE_SOURCE_DIR}/src/psf.c
    ${CMAKE_SOURCE_DIR}/src/util.c
    )
 
