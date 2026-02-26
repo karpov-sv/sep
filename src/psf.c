@@ -1046,6 +1046,79 @@ static int psf_cholesky_inverse(const double *l, int n, double *inv,
 }
 
 /*==========================================================================*/
+/*              PSF Model Rendering                                         */
+/*==========================================================================*/
+
+int sep_set_psf(void *arr, int dtype, int64_t w, int64_t h, sep_psf *psf,
+                double x, double y, double flux) {
+  int ix0, iy0;
+  int sx, sy;
+  int64_t imx, imy, pos;
+  int status;
+  double psfval, scale;
+  float fval;
+  float *farr;
+  double *darr;
+
+  if (!arr || !psf || w <= 0 || h <= 0) return ILLEGAL_APER_PARAMS;
+
+  if (dtype != SEP_TFLOAT && dtype != SEP_TDOUBLE) return ILLEGAL_DTYPE;
+
+  status = sep_psf_build(psf, x, y);
+  if (status != RETURN_OK) return status;
+
+  ix0 = (int)(x + 0.5);
+  iy0 = (int)(y + 0.5);
+
+  status = sep_psf_resample(psf, x - ix0, y - iy0);
+  if (status != RETURN_OK) return status;
+
+  psfval = 0.0;
+  for (sx = 0; sx < psf->rw * psf->rh; sx++) psfval += psf->resi[sx];
+  if (psfval <= 0.0) return RETURN_OK;
+
+  scale = flux / psfval;
+
+  if (dtype == SEP_TFLOAT) {
+    farr = (float *)arr;
+    for (sy = 0; sy < psf->rh; sy++) {
+      imy = iy0 - psf->rh / 2 + sy;
+      if (imy < 0 || imy >= h) continue;
+
+      for (sx = 0; sx < psf->rw; sx++) {
+        imx = ix0 - psf->rw / 2 + sx;
+        if (imx < 0 || imx >= w) continue;
+
+        fval = psf->resi[sy * psf->rw + sx];
+        if (fval == 0.0f) continue;
+
+        pos = imy * w + imx;
+        farr[pos] += (float)(scale * (double)fval);
+      }
+    }
+  } else {
+    darr = (double *)arr;
+    for (sy = 0; sy < psf->rh; sy++) {
+      imy = iy0 - psf->rh / 2 + sy;
+      if (imy < 0 || imy >= h) continue;
+
+      for (sx = 0; sx < psf->rw; sx++) {
+        imx = ix0 - psf->rw / 2 + sx;
+        if (imx < 0 || imx >= w) continue;
+
+        fval = psf->resi[sy * psf->rw + sx];
+        if (fval == 0.0f) continue;
+
+        pos = imy * w + imx;
+        darr[pos] += scale * (double)fval;
+      }
+    }
+  }
+
+  return RETURN_OK;
+}
+
+/*==========================================================================*/
 /*              PSF Flux Photometry (fixed position)                        */
 /*==========================================================================*/
 

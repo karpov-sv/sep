@@ -682,6 +682,28 @@ SEP_API int sep_psf_build(sep_psf * psf, double x, double y);
  */
 SEP_API int sep_psf_resample(sep_psf * psf, double dx, double dy);
 
+/* sep_set_psf()
+ *
+ * Add a scaled PSF model at position (x, y) to an image array.
+ *
+ * arr:   2D C-contiguous image buffer (float or double).
+ * dtype: SEP_TFLOAT or SEP_TDOUBLE.
+ * w, h:  Image dimensions.
+ * psf:   PSF model to evaluate and resample.
+ * x, y:  Source center in image coordinates.
+ * flux:  Source flux scaling.
+ */
+SEP_API int sep_set_psf(
+    void * arr,
+    int dtype,
+    int64_t w,
+    int64_t h,
+    sep_psf * psf,
+    double x,
+    double y,
+    double flux
+);
+
 /* sep_sum_psf()
  *
  * PSF flux photometry at a fixed position. Uses optimal extraction

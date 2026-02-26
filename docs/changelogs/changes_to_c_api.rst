@@ -107,3 +107,8 @@ All changes here are transparent to users of the Python interface.
 .. c:function:: void sep_set_ellipse()
 
  - The type of ``w`` and ``h`` has changed from ``int`` to ``int64_t``.
+
+.. c:function:: int sep_set_psf()
+
+ - Added PSF model rendering helper to add a source model at ``(x, y)``
+   with specified ``flux`` into a float/double image array.

@@ -83,6 +83,19 @@ With ``fit_positions=True`` (default), SEP iteratively solves for flux and
 subpixel shifts ``(dx, dy)`` using a linearized least-squares model per
 iteration.
 
+Building a PSF image model
+--------------------------
+
+Use `sep.model_psf` to render one or more PSF sources into an image array:
+
+.. code-block:: python
+
+    model = np.zeros_like(data, dtype=np.float32)
+    sep.model_psf(model, x, y, flux, psf)
+
+The array is updated in-place. Inputs ``x``, ``y``, and ``flux`` follow
+NumPy broadcasting rules, similar to `sep.mask_ellipse`.
+
 Grouped fitting for blends
 --------------------------
 

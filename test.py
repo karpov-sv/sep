@@ -1457,6 +1457,54 @@ def test_psf_from_psfex():
         os.unlink(fname)
 
 
+def test_model_psf_single_source_flux_recovery():
+    """model_psf renders a single source with the requested total flux."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    model = np.zeros((64, 64), dtype=np.float64)
+
+    x0, y0, f0 = 32.3, 31.7, 1234.5
+    sep.model_psf(model, x0, y0, f0, psf)
+
+    flux, fluxerr, _, _, flag = sep.psf_fit(
+        model, x0, y0, psf, fit_positions=False
+    )
+    assert_allclose(flux, f0, rtol=1.0e-5)
+    assert_allclose(model.sum(), f0, rtol=1.0e-5)
+    assert flag == 0
+
+
+def test_model_psf_broadcast_multiple_sources():
+    """model_psf supports broadcasting x/y/flux for multiple sources."""
+    fwhm = 4.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    model = np.zeros((96, 96), dtype=np.float32)
+
+    x = np.array([20.2, 70.4], dtype=np.float64)
+    y = np.array([25.5, 68.1], dtype=np.float64)
+    flux = np.array([700.0, 1200.0], dtype=np.float64)
+
+    sep.model_psf(model, x, y, flux, psf)
+
+    fitted, _, _, _, _ = sep.psf_fit(model, x, y, psf, fit_positions=False)
+    assert_allclose(fitted, flux, rtol=2.0e-4)
+
+
+def test_model_psf_inplace_add_and_truncation():
+    """model_psf accumulates in-place and clips safely at image boundaries."""
+    fwhm = 3.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    model = np.zeros((32, 32), dtype=np.float32)
+
+    sep.model_psf(model, 10.0, 10.0, 100.0, psf)
+    sep.model_psf(model, 10.0, 10.0, 200.0, psf)
+    assert_allclose(model.sum(), 300.0, rtol=2.0e-5)
+
+    sep.model_psf(model, 0.1, 0.2, 1000.0, psf)
+    assert model.sum() > 300.0
+    assert model.sum() < 1300.0
+
+
 def test_psf_fit_dtype_coercion():
     """psf_fit works correctly with non-float64 x/y inputs (regression)."""
     fwhm = 4.0

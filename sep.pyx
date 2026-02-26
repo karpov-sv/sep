@@ -278,6 +278,8 @@ cdef extern from "sep.h":
     void sep_psf_free(sep_psf *psf)
     int sep_psf_build(sep_psf *psf, double x, double y)
     int sep_psf_resample(sep_psf *psf, double dx, double dy)
+    int sep_set_psf(void *arr, int dtype, np.int64_t w, np.int64_t h,
+                    sep_psf *psf, double x, double y, double flux)
     int sep_sum_psf(const sep_image *im, sep_psf *psf,
                     double x, double y, int id, short inflag,
                     double *sum, double *sumerr, double *area, short *flag)
@@ -3117,6 +3119,59 @@ cdef class PSF:
         return cls(np.ascontiguousarray(data, dtype=np.float32),
                    sampling=sampling, degree=degree,
                    x0=x0, y0=y0, sx=sx, sy=sy, fwhm=fwhm)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def model_psf(np.ndarray arr not None, x, y, flux, PSF psf not None):
+    """model_psf(arr, x, y, flux, psf)
+
+    Add PSF model image(s) to an array in-place.
+
+    This evaluates and resamples the supplied PSF at each source position,
+    normalizes the stamp to unit sum, scales by ``flux``, and adds the result
+    into ``arr``.
+
+    Parameters
+    ----------
+    arr : `~numpy.ndarray`
+        Output image array to update in-place. Must be 2-d, C-contiguous,
+        and have dtype ``float32`` or ``float64``.
+    x, y : array_like
+        Source center(s).
+    flux : array_like
+        Source flux(es).
+    psf : `PSF`
+        PSF model.
+    """
+
+    cdef int status
+    cdef int dtype
+    cdef np.int64_t w, h
+    cdef np.ndarray[np.double_t, ndim=1, mode="c"] xbuf, ybuf, fbuf
+    cdef object shape
+    cdef np.int64_t i
+
+    _check_array_get_dims(arr, &w, &h)
+    dtype = _get_sep_dtype(arr.dtype)
+    if dtype != SEP_TFLOAT and dtype != SEP_TDOUBLE:
+        raise ValueError("arr must have dtype float32 or float64")
+
+    shape = np.broadcast(x, y, flux).shape
+    xbuf = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(x, dtype=np.float64), shape).ravel()
+    )
+    ybuf = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(y, dtype=np.float64), shape).ravel()
+    )
+    fbuf = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(flux, dtype=np.float64), shape).ravel()
+    )
+
+    for i in range(xbuf.shape[0]):
+        status = sep_set_psf(<void*>arr.data, dtype, w, h, psf.ptr,
+                             xbuf[i], ybuf[i], fbuf[i])
+        _assert_ok(status)
 
 
 @cython.boundscheck(False)

@@ -30,6 +30,7 @@ Reference/API
    sep.PSF
    sep.PSF.from_gaussian
    sep.PSF.from_psfex
+   sep.model_psf
    sep.psf_fit
 
 **Aperture utilities**
