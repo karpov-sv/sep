@@ -1051,8 +1051,12 @@ int sep_sum_psf(const sep_image *im, sep_psf *psf, double x, double y, int id,
       }
 
       if (varpix > 0.0) {
-        num += psfw * pix / varpix;
-        den += psfw * psfw / varpix;
+        double total_var = varpix;
+        if (im->gain > 0.0 && pix > 0.0) {
+          total_var += pix / im->gain;
+        }
+        num += psfw * pix / total_var;
+        den += psfw * psfw / total_var;
       } else {
         *flag |= SEP_APER_HASMASKED;
         maskarea += 1.0;
