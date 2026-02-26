@@ -826,6 +826,110 @@ static int svdvar(double *v, double *w, int n, double *cov) {
   return RETURN_OK;
 }
 
+/* Build normal equations for least squares with column-major A (m rows, n cols):
+ *   ata = A^T A, atb = A^T b
+ */
+static void psf_build_normal_eq(const double *a, const double *b, int m, int n,
+                                double *ata, double *atb) {
+  int i, j, p;
+
+  for (i = 0; i < n; i++) {
+    const double *ai = a + (size_t)i * m;
+    double rhs = 0.0;
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : rhs)
+#endif
+    for (p = 0; p < m; p++) rhs += ai[p] * b[p];
+    atb[i] = rhs;
+
+    for (j = 0; j <= i; j++) {
+      const double *aj = a + (size_t)j * m;
+      double sum = 0.0;
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : sum)
+#endif
+      for (p = 0; p < m; p++) sum += ai[p] * aj[p];
+      ata[i * n + j] = sum;
+      ata[j * n + i] = sum;
+    }
+  }
+}
+
+/* Cholesky factorization: A = L * L^T (in-place in lower triangle). */
+static int psf_cholesky_factor(double *a, int n) {
+  int i, j, k;
+
+  for (i = 0; i < n; i++) {
+    for (j = 0; j <= i; j++) {
+      double sum = a[i * n + j];
+      for (k = 0; k < j; k++) sum -= a[i * n + k] * a[j * n + k];
+
+      if (i == j) {
+        if (!(sum > 0.0) || !isfinite(sum)) return ILLEGAL_APER_PARAMS;
+        a[i * n + i] = sqrt(sum);
+      } else {
+        a[i * n + j] = sum / a[j * n + j];
+      }
+    }
+
+    for (j = i + 1; j < n; j++) a[i * n + j] = 0.0;
+  }
+
+  return RETURN_OK;
+}
+
+/* Solve (L * L^T) x = rhs for x, with L from psf_cholesky_factor().
+ * rhs is overwritten with the forward-solve intermediate vector. */
+static void psf_cholesky_solve(const double *l, int n, double *rhs, double *x) {
+  int i, k;
+
+  for (i = 0; i < n; i++) {
+    double sum = rhs[i];
+    for (k = 0; k < i; k++) sum -= l[i * n + k] * rhs[k];
+    rhs[i] = sum / l[i * n + i];
+  }
+
+  for (i = n - 1; i >= 0; i--) {
+    double sum = rhs[i];
+    for (k = i + 1; k < n; k++) sum -= l[k * n + i] * x[k];
+    x[i] = sum / l[i * n + i];
+  }
+}
+
+/* Invert SPD matrix from Cholesky factor L (L * L^T = A). */
+static int psf_cholesky_inverse(const double *l, int n, double *inv,
+                                double *rhs, double *x) {
+  int i, j, k;
+
+  for (j = 0; j < n; j++) {
+    for (i = 0; i < n; i++) rhs[i] = (i == j) ? 1.0 : 0.0;
+
+    for (i = 0; i < n; i++) {
+      double sum = rhs[i];
+      for (k = 0; k < i; k++) sum -= l[i * n + k] * rhs[k];
+      rhs[i] = sum / l[i * n + i];
+    }
+
+    for (i = n - 1; i >= 0; i--) {
+      double sum = rhs[i];
+      for (k = i + 1; k < n; k++) sum -= l[k * n + i] * x[k];
+      x[i] = sum / l[i * n + i];
+    }
+
+    for (i = 0; i < n; i++) inv[i * n + j] = x[i];
+  }
+
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < i; j++) {
+      double v = 0.5 * (inv[i * n + j] + inv[j * n + i]);
+      inv[i * n + j] = v;
+      inv[j * n + i] = v;
+    }
+  }
+
+  return RETURN_OK;
+}
+
 /*==========================================================================*/
 /*              PSF Flux Photometry (fixed position)                        */
 /*==========================================================================*/
@@ -1447,7 +1551,7 @@ static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
     int height = psf->rh;
     int64_t gxmin, gxmax, gymin, gymax;
     int gw, gh, gnpix;
-    int iter, convflag;
+    int iter, convflag, used_svd_last, used_svd_this;
     double *gdata = NULL, *gweight = NULL;
     double *gmat = NULL, *gsol = NULL, *gvmat = NULL, *gwmat = NULL;
     double *gcovmat = NULL, *grv1 = NULL, *gtmp = NULL;
@@ -1458,6 +1562,8 @@ static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
     int errisarray, errisstd;
     double vp;
     int alloc_ok = 1;
+
+    used_svd_last = 0;
 
     /* Compute group bounding box */
     gxmin = (int64_t)im->w;
@@ -1703,10 +1809,19 @@ static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
         }
       }
 
-      /* Solve via SVD */
-      status = svdfit(gmat, gdata, gnpix, npar, gsol, gvmat, gwmat, grv1, gtmp);
+      /* Solve least squares: Cholesky on normal equations, fall back to SVD. */
+      used_svd_this = 0;
+      psf_build_normal_eq(gmat, gdata, gnpix, npar, gvmat, gwmat);
+      status = psf_cholesky_factor(gvmat, npar);
+      if (status == RETURN_OK) {
+        psf_cholesky_solve(gvmat, npar, gwmat, gsol);
+      } else {
+        status = svdfit(gmat, gdata, gnpix, npar, gsol, gvmat, gwmat, grv1,
+                        gtmp);
+        if (status == RETURN_OK) used_svd_this = 1;
+      }
       if (status != RETURN_OK) {
-        /* SVD failed, fall back to individual fits */
+        /* Dense solve failed, fall back to individual fits */
         status = RETURN_OK;
         for (i = 0; i < gcount; i++) {
           int idx2 = gidx[i];
@@ -1719,6 +1834,7 @@ static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
         }
         goto group_exit;
       }
+      used_svd_last = used_svd_this;
 
       /* Update positions with damping for multi-component */
       for (i = 0; i < gcount; i++) {
@@ -1753,7 +1869,11 @@ static int psf_fit_group(const sep_image *im, sep_psf *psf, const double *x,
     }
 
     /* Compute covariance and extract errors */
-    status = svdvar(gvmat, gwmat, npar, gcovmat);
+    if (used_svd_last) {
+      status = svdvar(gvmat, gwmat, npar, gcovmat);
+    } else {
+      status = psf_cholesky_inverse(gvmat, npar, gcovmat, gwmat, gtmp);
+    }
     if (status == RETURN_OK) {
       for (i = 0; i < gcount; i++) {
         int idx = gidx[i];
