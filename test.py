@@ -1149,11 +1149,20 @@ def test_long_error_msg():
 
 
 def _make_gaussian_source(nx, ny, xcen, ycen, flux, fwhm):
-    """Create an image with a single Gaussian source."""
+    """Create an image with a single pixel-integrated Gaussian source."""
     sigma = fwhm / 2.3548
-    y, x = np.mgrid[0:ny, 0:nx]
-    img = flux * np.exp(-((x - xcen) ** 2 + (y - ycen) ** 2) / (2 * sigma**2))
-    img = img / (2 * np.pi * sigma**2)
+    x = np.array([
+        0.5 * (math.erf((i + 0.5 - xcen) / (math.sqrt(2) * sigma)) -
+               math.erf((i - 0.5 - xcen) / (math.sqrt(2) * sigma)))
+        for i in range(nx)
+    ], dtype=np.float64)
+    y = np.array([
+        0.5 * (math.erf((j + 0.5 - ycen) / (math.sqrt(2) * sigma)) -
+               math.erf((j - 0.5 - ycen) / (math.sqrt(2) * sigma)))
+        for j in range(ny)
+    ], dtype=np.float64)
+    img = np.outer(y, x)
+    img = flux * img / img.sum()
     return img.astype(np.float32)
 
 
@@ -1639,3 +1648,77 @@ def test_psf_fit_native_sampling_accuracy():
             assert_allclose(flux_n, flux_s, rtol=0.02,
                             err_msg=f"Native vs super mismatch at offset "
                                     f"({dx}, {dy})")
+
+
+def test_psf_non_integer_sampling_no_quantization():
+    """Non-integer PSF sampling keeps native stamp size from continuous scale."""
+    fwhm = 4.0
+    sampling = 0.6
+    w = 25
+
+    y, x = np.mgrid[0:w, 0:w]
+    cx = w // 2
+    sigma_psf = (fwhm / 2.3548) / sampling
+    stamp = np.exp(-((x - cx)**2 + (y - cx)**2) / (2 * sigma_psf**2))
+    stamp = (stamp / stamp.sum()).astype(np.float32)
+    psf = sep.PSF(stamp[np.newaxis, :, :], sampling=sampling, degree=0, fwhm=fwhm)
+
+    expected_size = int(np.floor(w * sampling + 0.5))
+    assert psf.stamp_width == expected_size
+    assert psf.stamp_height == expected_size
+
+    # Smoke check that fitting with this PSF remains numerically stable.
+    true_flux = 1000.0
+    sigma = fwhm / 2.3548
+    ny, nx = 64, 64
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    xcen, ycen = 32.3, 31.7
+    data = (true_flux * np.exp(
+        -((xx - xcen)**2 + (yy - ycen)**2) /
+        (2 * sigma**2)) / (2 * np.pi * sigma**2)).astype(np.float32)
+
+    flux, fluxerr, _, _, flag = sep.psf_fit(
+        data, xcen, ycen, psf, fit_positions=False)
+    assert np.isfinite(flux)
+    assert np.isfinite(fluxerr)
+    assert flag == 0
+
+
+def test_psf_non_integer_sampling_pixel_integrated_bias():
+    """Non-integer sampling PSF fit should have low baseline integrated bias."""
+    fwhm = 4.0
+    sigma = fwhm / 2.354820045
+    true_flux = 1000.0
+    ny, nx = 64, 64
+    sampling = 0.6
+    w = 25
+    y, x = np.mgrid[0:w, 0:w]
+    cx = w // 2
+    sigma_psf = sigma / sampling
+    stamp = np.exp(-((x - cx)**2 + (y - cx)**2) / (2 * sigma_psf**2))
+    stamp = (stamp / stamp.sum()).astype(np.float32)
+    psf = sep.PSF(stamp[np.newaxis, :, :], sampling=sampling, degree=0,
+                  fwhm=fwhm)
+
+    def _int_g1(center, a, b):
+        return 0.5 * (math.erf((b - center) / (math.sqrt(2) * sigma)) -
+                      math.erf((a - center) / (math.sqrt(2) * sigma)))
+
+    offsets = [0.05, 0.25, 0.45, 0.65, 0.85]
+    fracs = []
+    for dx in offsets:
+        for dy in offsets:
+            xcen = 32.0 + dx
+            ycen = 32.0 + dy
+            x_int = np.array([_int_g1(xcen, i - 0.5, i + 0.5)
+                              for i in range(nx)], dtype=np.float64)
+            y_int = np.array([_int_g1(ycen, j - 0.5, j + 0.5)
+                              for j in range(ny)], dtype=np.float64)
+            data = np.outer(y_int, x_int)
+            data *= true_flux / data.sum()
+            data = data.astype(np.float32)
+            flux, _, _, _, _ = sep.psf_fit(data, xcen, ycen, psf,
+                                           fit_positions=False)
+            fracs.append(float(flux) / true_flux - 1.0)
+
+    assert abs(np.median(fracs)) < 0.01

@@ -185,8 +185,8 @@ int sep_psf_create(sep_psf **out, const float *data, int w, int h, int ncomp,
                    float pixstep, double fwhm) {
   sep_psf *psf = NULL;
   int status = RETURN_OK;
-  int npix, datalen, oversamp, rw, rh, rnpix;
-  int maxdim, mask_len, nmask_len, buf_len, npar;
+  int npix, datalen, rw, rh, rnpix;
+  int maxdim, mask_len, nmask_len, buf_len, npar, remap_kw;
 
   if (w <= 0 || h <= 0 || ncomp <= 0 || pixstep <= 0.0f) {
     return ILLEGAL_APER_PARAMS;
@@ -208,11 +208,9 @@ int sep_psf_create(sep_psf **out, const float *data, int w, int h, int ncomp,
   psf->pixstep = pixstep;
   psf->fwhm = fwhm;
 
-  /* Compute native-resolution stamp dimensions */
-  oversamp = (int)(1.0f / pixstep + 0.5f);
-  if (oversamp < 1) oversamp = 1;
-  rw = w / oversamp;
-  rh = h / oversamp;
+  /* Compute native-resolution stamp dimensions from continuous sampling. */
+  rw = (int)floor((double)w * (double)pixstep + 0.5);
+  rh = (int)floor((double)h * (double)pixstep + 0.5);
   if (rw < 1) rw = 1;
   if (rh < 1) rh = 1;
   psf->rw = rw;
@@ -230,7 +228,9 @@ int sep_psf_create(sep_psf **out, const float *data, int w, int h, int ncomp,
    * nmask/start need max(rw, rh) ints each.
    * buf needs rw * h floats (intermediate x-resampled buffer). */
   maxdim = rw > rh ? rw : rh;
-  mask_len = maxdim * INTERPW;
+  remap_kw = (int)ceil(1.0f / pixstep) + 4;
+  if (remap_kw < INTERPW) remap_kw = INTERPW;
+  mask_len = maxdim * remap_kw;
   nmask_len = maxdim;
   buf_len = rw * h;
 
@@ -314,7 +314,7 @@ int sep_psf_build(sep_psf *psf, double x, double y) {
 }
 
 /*==========================================================================*/
-/*         Lanczos Sinc Resampling (ported from SExtractor image.c)         */
+/*         PSF Resampling                                                   */
 /*==========================================================================*/
 
 int sep_psf_resample(sep_psf *psf, double dx, double dy) {
@@ -398,6 +398,121 @@ int sep_psf_resample(sep_psf *psf, double dx, double dy) {
   ny2 = (int)((h1 - 1 - ys1) / step2 + 1);
   if (ny2 > (h2 - iys2)) ny2 = h2 - iys2;
   if (ny2 <= 0) return RETURN_OK;
+
+  /* For supersampled PSFs, use conservative area-overlap remapping.
+   * This preserves flux across sampling changes and reduces phase bias. */
+  if (psf->pixstep < 1.0f) {
+    float xlo, xhi, ylo, yhi, left, right, ov;
+
+    /* Compute x overlap kernels */
+    x1 = xs1;
+    maskt = mask;
+    nmaskt = nmask;
+    startt = start;
+    for (j = 0; j < nx2; j++, x1 += step2) {
+      int ix_start, ix_end;
+      xlo = x1 - 0.5f * step2;
+      xhi = x1 + 0.5f * step2;
+      ix_start = (int)floorf(xlo) - 1;
+      ix_end = (int)floorf(xhi) + 1;
+      if (ix_start < 0) ix_start = 0;
+      if (ix_end > w1 - 1) ix_end = w1 - 1;
+      n = ix_end - ix_start + 1;
+      if (n <= 0) {
+        *(startt++) = 0;
+        *(nmaskt++) = 0;
+        continue;
+      }
+      *(startt++) = ix_start;
+      *(nmaskt++) = n;
+      for (i = 0; i < n; i++) {
+        ix = ix_start + i;
+        left = (float)ix - 0.5f;
+        right = left + 1.0f;
+        ov = fminf(xhi, right) - fmaxf(xlo, left);
+        *(maskt++) = ov > 0.0f ? ov : 0.0f;
+      }
+    }
+
+    /* Integrate in x for every input row (store transposed) */
+    memset(pix12, 0, (size_t)nx2 * h1 * sizeof(float));
+    pixin0 = pix1;
+    for (k = 0; k < h1; k++, pixin0 += w1) {
+      maskt = mask;
+      nmaskt = nmask;
+      startt = start;
+      for (j = 0; j < nx2; j++) {
+        int sx0 = *(startt++);
+        n = *(nmaskt++);
+        val = 0.0f;
+        if (n > 0) {
+          pixin = pixin0 + sx0;
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : val)
+#endif
+          for (i = 0; i < n; i++) val += maskt[i] * pixin[i];
+          maskt += n;
+        }
+        pix12[j * h1 + k] = val;
+      }
+    }
+
+    /* Compute y overlap kernels */
+    y1 = ys1;
+    maskt = mask;
+    nmaskt = nmask;
+    startt = start;
+    for (j = 0; j < ny2; j++, y1 += step2) {
+      int iy_start, iy_end;
+      ylo = y1 - 0.5f * step2;
+      yhi = y1 + 0.5f * step2;
+      iy_start = (int)floorf(ylo) - 1;
+      iy_end = (int)floorf(yhi) + 1;
+      if (iy_start < 0) iy_start = 0;
+      if (iy_end > h1 - 1) iy_end = h1 - 1;
+      n = iy_end - iy_start + 1;
+      if (n <= 0) {
+        *(startt++) = 0;
+        *(nmaskt++) = 0;
+        continue;
+      }
+      *(startt++) = iy_start;
+      *(nmaskt++) = n;
+      for (i = 0; i < n; i++) {
+        iy = iy_start + i;
+        left = (float)iy - 0.5f;
+        right = left + 1.0f;
+        ov = fminf(yhi, right) - fmaxf(ylo, left);
+        *(maskt++) = ov > 0.0f ? ov : 0.0f;
+      }
+    }
+
+    /* Integrate in y and transpose back to output stamp */
+    pixout0 = pix2 + ixs2 + iys2 * w2;
+    for (k = 0; k < nx2; k++, pixout0++) {
+      pixin0 = pix12 + k * h1;
+      pixout = pixout0;
+      maskt = mask;
+      nmaskt = nmask;
+      startt = start;
+      for (j = 0; j < ny2; j++, pixout += w2) {
+        int sy0 = *(startt++);
+        n = *(nmaskt++);
+        val = 0.0f;
+        if (n > 0) {
+          pixin = pixin0 + sy0;
+#if defined(_OPENMP)
+#pragma omp simd reduction(+ : val)
+#endif
+          for (i = 0; i < n; i++) val += maskt[i] * pixin[i];
+          maskt += n;
+        }
+        *pixout = val;
+      }
+    }
+
+    return RETURN_OK;
+  }
 
   /* Set y-range for x-resampling with interpolation margin */
   iys1a = (int)ys1;
