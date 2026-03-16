@@ -1178,19 +1178,34 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
 }
 
 /************************** get_mean_thresh **********************************/
-/* Compute an average threshold from all pixels in the cluster */
+/* Compute an average threshold from all pixels in the cluster.
+ * Pixels whose per-pixel threshold is near BIG are excluded from the
+ * average — these come from masked pixels whose noise was set to BIG
+ * in apply_mask_line(). Including them would corrupt the mean threshold
+ * (yielding ~1e28), causing analyse() to compute tnpix=0 for objects
+ * whose footprints overlap masked regions. */
 
 PIXTYPE get_mean_thresh(infostruct * info, pliststruct * pixel) {
   pliststruct * pixt;
   int pix_accum = 0;
   double thresh_accum = 0;
+  PIXTYPE thresh_limit = (PIXTYPE)(BIG * 1e-6);
 
   // Threshold must be cast to double to avoid precision loss
   for (pixt = pixel + info->firstpix; pixt >= pixel;
        pixt = pixel + PLIST(pixt, nextpix))
   {
-    thresh_accum += (double)PLISTPIX(pixt, thresh);
-    pix_accum++;
+    PIXTYPE t = PLISTPIX(pixt, thresh);
+    if (t < thresh_limit) {
+      thresh_accum += (double)t;
+      pix_accum++;
+    }
+  }
+
+  if (pix_accum == 0) {
+    /* All pixels were masked — return BIG so that analyse() computes
+     * dnpix=0 and the object is effectively discarded. */
+    return (PIXTYPE)BIG;
   }
 
   return (PIXTYPE)(thresh_accum / pix_accum);
