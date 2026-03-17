@@ -271,6 +271,7 @@ cdef extern from "sep.h":
         float *resi
         int rw, rh
         double fit_radius
+        double damp_snthresh
 
     int sep_psf_create(sep_psf **psf,
                        const float *data, int w, int h, int ncomp,
@@ -3192,7 +3193,7 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
             seg_id=None, np.ndarray segmap=None,
             bint grouped=False, double group_factor=2.0,
             int maxiter=20, bint fit_positions=True,
-            double fit_radius=0.0):
+            double fit_radius=0.0, double damp_snthresh=0.0):
     """psf_fit(data, x, y, psf, ...)
 
     Fit a PSF model to sources in image data.
@@ -3238,6 +3239,13 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         source center participate in the fit. Reduces neighbor contamination
         by limiting the effective stamp size. A value of 0 means use the
         full PSF stamp (default 0.0). Typical values: 2-3 * FWHM.
+    damp_snthresh : float, optional
+        S/N threshold for position damping. Sources with S/N well above
+        this threshold fit positions freely; sources below are pulled
+        toward their initial positions. Internally converted to Tikhonov
+        regularization strength via ``damp_pos = (damp_snthresh / sigma_psf)^2``
+        where ``sigma_psf = fwhm / 2.3548``. A value of 0 disables
+        damping (default 0.0). Typical values: 20-50.
 
     Returns
     -------
@@ -3273,6 +3281,7 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
     cdef np.ndarray[np.int16_t, ndim=1, mode="c"] gflag
 
     cdef double old_fit_radius
+    cdef double old_damp_snthresh
 
     _parse_arrays(data, err, var, mask, segmap, &im)
     im.maskthresh = maskthresh
@@ -3280,10 +3289,12 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
     if gain is not None:
         im.gain = gain
 
-    # Temporarily override fit_radius on PSF.  The parameter always takes
-    # precedence (0.0 means "full stamp" regardless of psf.fit_radius).
+    # Temporarily override fit_radius and damp_snthresh on PSF.
+    # The parameters always take precedence.
     old_fit_radius = psf.ptr.fit_radius
     psf.ptr.fit_radius = fit_radius
+    old_damp_snthresh = psf.ptr.damp_snthresh
+    psf.ptr.damp_snthresh = damp_snthresh
 
     # Coerce coordinate inputs to correct dtypes for safe pointer casts
     x = np.asarray(x, dtype=np.float64)
@@ -3421,3 +3432,4 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
                     np.asarray(gniter).astype(np.intc).reshape(shape))
     finally:
         psf.ptr.fit_radius = old_fit_radius
+        psf.ptr.damp_snthresh = old_damp_snthresh

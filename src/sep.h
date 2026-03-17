@@ -158,6 +158,14 @@ typedef struct {
    * center participate in PSF photometry (both flux-only and full fitting).
    * Units are native image pixels.  A value of 0 means use the full stamp. */
   double fit_radius;
+
+  /* Position damping: S/N threshold for Tikhonov regularization on position
+   * parameters.  Sources with S/N below this threshold are pulled toward
+   * their initial positions; sources well above move freely.
+   * Internally converted to damp_pos = (damp_snthresh / sigma_psf)^2
+   * where sigma_psf = fwhm / 2.3548.  A value of 0 disables damping
+   * (default). */
+  double damp_snthresh;
 } sep_psf;
 
 /* sep_catalog

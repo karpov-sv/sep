@@ -365,6 +365,7 @@ int sep_psf_create(sep_psf **out, const float *data, int w, int h, int ncomp,
   psf->pixstep = pixstep;
   psf->fwhm = fwhm;
   psf->fit_radius = 0.0; /* 0 = use full stamp */
+  psf->damp_snthresh = 0.0;   /* 0 = no position damping */
 
   /* Compute native-resolution stamp dimensions from continuous sampling. */
   rw = (int)floor((double)w * (double)pixstep + 0.5);
@@ -1940,7 +1941,8 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
   double *sol, *vmat, *wmat, *covmat;
   double *rv1, *tmp;
   double pix, varpix, dx_update, dy_update;
-  double radmax2, fit_r2;
+  double radmax2, fit_r2, damp_pos;
+  int damp_active;
   converter convert, econvert, mconvert, sconvert;
   int64_t size, esize, msize, ssize;
   const void *datat, *errort, *maskt, *segt;
@@ -1966,6 +1968,16 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
 
   radmax2 = (double)(width / 2) * (width / 2);
   fit_r2 = (psf->fit_radius > 0.0) ? psf->fit_radius * psf->fit_radius : 0.0;
+
+  /* Convert S/N threshold to position damping strength:
+   * damp_pos = (damp_snthresh / sigma_psf)^2  where sigma_psf = fwhm/2.3548 */
+  damp_pos = 0.0;
+  if (psf->damp_snthresh > 0.0) {
+    if (psf->fwhm <= 0.0) return ILLEGAL_APER_PARAMS;
+    double sigma_psf = psf->fwhm / 2.3548;
+    double ratio = psf->damp_snthresh / sigma_psf;
+    damp_pos = ratio * ratio;
+  }
 
   /* Use pre-allocated workspace */
   mat = psf->fit_mat;
@@ -2078,6 +2090,30 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
     }
   }
 
+  /* Bootstrap initial flux estimate for position damping.
+   * Compute matched-filter flux = sum(PSF*w*data) / sum(PSF^2*w^2)
+   * so that damp_pos regularization is active from iteration 0. */
+  if (damp_pos > 0.0) {
+    status = sep_psf_build(psf, x, y);
+    if (status == RETURN_OK) {
+      status = sep_psf_resample(psf, x - ix0, y - iy0);
+    }
+    if (status == RETURN_OK) {
+      double psfsum = 0.0;
+      for (sx = 0; sx < npix; sx++) psfsum += psf->resi[sx];
+      if (psfsum > 0.0) {
+        double num = 0.0, den = 0.0;
+        for (sx = 0; sx < npix; sx++) {
+          double pw = psf->resi[sx] / psfsum * weight[sx];
+          num += pw * data_vec[sx];
+          den += pw * pw;
+        }
+        if (den > 0.0) *flux = num / den;
+      }
+    }
+    status = RETURN_OK; /* non-critical bootstrap */
+  }
+
   /* Iterative fitting loop */
   for (iter = 0; iter < maxiter; iter++) {
     convflag = 0;
@@ -2102,9 +2138,96 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
     /* Build design matrix */
     compute_gradient(psf->resi, weight, width, height, mat);
 
-    /* Solve via SVD */
-    status = svdfit(mat, data_vec, npix, npar, sol, vmat, wmat, rv1, tmp);
-    if (status != RETURN_OK) return status;
+    /* Form 3×3 normal equations: ata = A^T A, atb = A^T b.
+     * This replaces full SVD on the npix×3 matrix and allows adding
+     * position damping as diagonal regularization. */
+    {
+      double ata[PSF_NA * PSF_NA];
+      double atb[PSF_NA];
+      int p, a, b;
+      const double *col0 = mat;
+      const double *col1 = mat + npix;
+      const double *col2 = mat + 2 * npix;
+
+      memset(ata, 0, sizeof(ata));
+      memset(atb, 0, sizeof(atb));
+
+      for (p = 0; p < npix; p++) {
+        double c0 = col0[p], c1 = col1[p], c2 = col2[p];
+        double d = data_vec[p];
+        ata[0] += c0 * c0;
+        ata[1] += c0 * c1;
+        ata[2] += c0 * c2;
+        ata[4] += c1 * c1;
+        ata[5] += c1 * c2;
+        ata[8] += c2 * c2;
+        atb[0] += c0 * d;
+        atb[1] += c1 * d;
+        atb[2] += c2 * d;
+      }
+      /* Symmetrize */
+      ata[3] = ata[1];
+      ata[6] = ata[2];
+      ata[7] = ata[5];
+
+      /* Position damping: Tikhonov regularization pulling toward initial pos.
+       * The prior is damp_pos * total_displacement^2 in pixel space.
+       * In sol[1] space (sol[1] ~ flux*dx): lambda = damp_pos / flux^2.
+       * The Atb correction pulls toward zero total displacement:
+       *   Atb[1] += lambda * flux * deltax  (prior target = return to start).
+       * Effect: bright sources (large flux) → lambda small → free to move.
+       *         faint sources (small flux) → lambda large → held at initial. */
+      if (damp_pos > 0.0 && fabs(*flux) > 1.0e-30) {
+        double f2 = (*flux) * (*flux);
+        double lambda = damp_pos / f2;
+        ata[4] += lambda;  /* ATA[1,1] for dx */
+        ata[8] += lambda;  /* ATA[2,2] for dy */
+        atb[1] += lambda * (*flux) * deltax;  /* pull toward zero total shift */
+        atb[2] += lambda * (*flux) * deltay;
+      }
+
+      /* Solve via Cholesky.  When damping is active the regularized AᵀA
+       * is guaranteed positive-definite, so Cholesky should always succeed.
+       * If it somehow fails, fall back to SVD on the raw (undamped) design
+       * matrix, then re-apply the damping correction to the SVD solution. */
+      damp_active = (damp_pos > 0.0 && fabs(*flux) > 1.0e-30);
+      status = psf_cholesky_factor(ata, npar);
+      if (status == RETURN_OK) {
+        psf_cholesky_solve(ata, npar, atb, sol);
+      } else {
+        status = svdfit(mat, data_vec, npix, npar, sol, vmat, wmat, rv1, tmp);
+        if (status != RETURN_OK) return status;
+        /* SVD gave the undamped solution.  Re-solve the damped 3×3 system
+         * so that the position prior is honoured even on this path. */
+        if (damp_active) {
+          double ata2[PSF_NA * PSF_NA];
+          double atb2[PSF_NA];
+          double f2 = (*flux) * (*flux);
+          double lambda = damp_pos / f2;
+          memset(ata2, 0, sizeof(ata2));
+          memset(atb2, 0, sizeof(atb2));
+          for (p = 0; p < npix; p++) {
+            double c0 = col0[p], c1 = col1[p], c2 = col2[p];
+            double d = data_vec[p];
+            ata2[0] += c0 * c0; ata2[1] += c0 * c1; ata2[2] += c0 * c2;
+            ata2[4] += c1 * c1; ata2[5] += c1 * c2; ata2[8] += c2 * c2;
+            atb2[0] += c0 * d;  atb2[1] += c1 * d;  atb2[2] += c2 * d;
+          }
+          ata2[3] = ata2[1]; ata2[6] = ata2[2]; ata2[7] = ata2[5];
+          ata2[4] += lambda; ata2[8] += lambda;
+          atb2[1] += lambda * (*flux) * deltax;
+          atb2[2] += lambda * (*flux) * deltay;
+          status = psf_cholesky_factor(ata2, npar);
+          if (status == RETURN_OK) {
+            psf_cholesky_solve(ata2, npar, atb2, sol);
+          } else {
+            /* Damped re-solve also failed; solution is undamped SVD. */
+            damp_active = 0;
+          }
+          status = RETURN_OK;
+        }
+      }
+    }
 
     /* Extract flux and position updates */
     *flux = sol[0];
@@ -2140,10 +2263,48 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
   *xfit = x + deltax;
   *yfit = y + deltay;
 
-  /* Compute covariance from SVD */
-  memset(covmat, 0, (size_t)(npar * npar) * sizeof(double));
-  status = svdvar(vmat, wmat, npar, covmat);
-  if (status != RETURN_OK) return status;
+  /* Compute covariance: rebuild AᵀA at final position and invert.
+   * We use vmat as scratch for the Cholesky factor, covmat for the result. */
+  {
+    double ata_final[PSF_NA * PSF_NA];
+    const double *col0 = mat;
+    const double *col1 = mat + npix;
+    const double *col2 = mat + 2 * npix;
+
+    /* Rebuild AᵀA from the last iteration's design matrix */
+    memset(ata_final, 0, sizeof(ata_final));
+    for (sx = 0; sx < npix; sx++) {
+      double c0 = col0[sx], c1 = col1[sx], c2 = col2[sx];
+      ata_final[0] += c0 * c0;
+      ata_final[1] += c0 * c1;
+      ata_final[2] += c0 * c2;
+      ata_final[4] += c1 * c1;
+      ata_final[5] += c1 * c2;
+      ata_final[8] += c2 * c2;
+    }
+    ata_final[3] = ata_final[1];
+    ata_final[6] = ata_final[2];
+    ata_final[7] = ata_final[5];
+
+    /* Include regularization in covariance only if damping was actually
+     * applied in the solution (not if the damped re-solve failed). */
+    if (damp_active && fabs(*flux) > 1.0e-30) {
+      double lambda = damp_pos / ((*flux) * (*flux));
+      ata_final[4] += lambda;
+      ata_final[8] += lambda;
+    }
+
+    memset(covmat, 0, (size_t)(npar * npar) * sizeof(double));
+    status = psf_cholesky_factor(ata_final, npar);
+    if (status == RETURN_OK) {
+      status = psf_cholesky_inverse(ata_final, npar, covmat, wmat, tmp);
+    }
+    if (status != RETURN_OK) {
+      /* Fall back: zero covariance (errors will be zero) */
+      memset(covmat, 0, (size_t)(npar * npar) * sizeof(double));
+      status = RETURN_OK;
+    }
+  }
 
   /* Extract errors */
   {
@@ -2336,7 +2497,16 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
                           int *pniter, double *pchi2, short *pflag) {
   int status = RETURN_OK;
   int i, j;
-  double dx, dy;
+  double dx, dy, damp_pos;
+
+  /* Convert S/N threshold to position damping strength */
+  damp_pos = 0.0;
+  if (psf->damp_snthresh > 0.0) {
+    if (psf->fwhm <= 0.0) return ILLEGAL_APER_PARAMS;
+    double sigma_psf = psf->fwhm / 2.3548;
+    double ratio = psf->damp_snthresh / sigma_psf;
+    damp_pos = ratio * ratio;
+  }
 
   if (gcount == 1 && fixed_count == 0) {
     /* Singleton: delegate to single-source fitter */
@@ -2633,6 +2803,25 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
         }
       }
 
+      /* Position damping: same prior as sep_psf_fit.
+       * lambda_i = damp_pos / flux_i^2 for each source.
+       * Atb correction pulls toward zero total displacement. */
+      if (damp_pos > 0.0) {
+        for (i = 0; i < gcount; i++) {
+          int idx = gidx[i];
+          double fi = pflux[idx];
+          if (fabs(fi) > 1.0e-30) {
+            double f2 = fi * fi;
+            double lambda = damp_pos / f2;
+            int base = i * PSF_NA;
+            gvmat[(base + 1) * npar + (base + 1)] += lambda;
+            gvmat[(base + 2) * npar + (base + 2)] += lambda;
+            gwmat[base + 1] += lambda * fi * deltax_arr[i];
+            gwmat[base + 2] += lambda * fi * deltay_arr[i];
+          }
+        }
+      }
+
       /* Solve least squares: direct normal equations first, SVD only on fallback. */
       used_svd_this = 0;
       status = psf_cholesky_factor(gvmat, npar);
@@ -2646,7 +2835,60 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
                              height, gw, gh);
         status = svdfit_tol(gmat, gdata, gnpix, npar, gsol, gvmat, gwmat, grv1,
                             gtmp, PSF_GROUP_SVD_TOL);
-        if (status == RETURN_OK) used_svd_this = 1;
+        if (status == RETURN_OK) {
+          used_svd_this = 1;
+          /* SVD solved the undamped system.  If damping is active, rebuild
+           * the normal equations with regularization and re-solve so the
+           * position prior is honoured even on this fallback path. */
+          if (damp_pos > 0.0) {
+            /* Rebuild AᵀA from compact columns (gvmat/gwmat were consumed
+             * by svdfit_tol, which stores V and W there). */
+            memset(gvmat, 0, (size_t)npar * (size_t)npar * sizeof(double));
+            memset(gwmat, 0, (size_t)npar * sizeof(double));
+            for (i = 0; i < gcount; i++) {
+              const double *coli = cols + (size_t)i * PSF_NA * (size_t)stamp_npix;
+              int base_i = i * PSF_NA;
+              for (j = 0; j <= i; j++) {
+                const double *colj = cols + (size_t)j * PSF_NA * (size_t)stamp_npix;
+                int base_j = j * PSF_NA;
+                psf_accum_pair_ata(coli, ixoff[i], iyoff[i], colj, ixoff[j],
+                                   iyoff[j], width, height, gw, gh, gvmat, npar,
+                                   base_i, base_j);
+              }
+              psf_accum_source_atb(coli, gdata, width, height, gw, gh, ixoff[i],
+                                   iyoff[i], gwmat + i * PSF_NA);
+            }
+            /* Add damping */
+            for (i = 0; i < gcount; i++) {
+              int idx = gidx[i];
+              double fi = pflux[idx];
+              if (fabs(fi) > 1.0e-30) {
+                double f2 = fi * fi;
+                double lambda = damp_pos / f2;
+                int base = i * PSF_NA;
+                gvmat[(base + 1) * npar + (base + 1)] += lambda;
+                gvmat[(base + 2) * npar + (base + 2)] += lambda;
+                gwmat[base + 1] += lambda * fi * deltax_arr[i];
+                gwmat[base + 2] += lambda * fi * deltay_arr[i];
+              }
+            }
+            status = psf_cholesky_factor(gvmat, npar);
+            if (status == RETURN_OK) {
+              psf_cholesky_solve(gvmat, npar, gwmat, gsol);
+              used_svd_this = 0;  /* damped Cholesky succeeded */
+            } else {
+              /* Damped Cholesky failed — gvmat is clobbered.  Re-run SVD
+               * so that gvmat/gwmat hold valid V/W for svdvar(). */
+              psf_group_build_gmat(gmat, gnpix, gcount, cols, ixoff, iyoff,
+                                   width, height, gw, gh);
+              status = svdfit_tol(gmat, gdata, gnpix, npar, gsol, gvmat,
+                                  gwmat, grv1, gtmp, PSF_GROUP_SVD_TOL);
+              /* gsol is re-computed (undamped); gvmat/gwmat are valid SVD
+               * output for covariance.  If this SVD also fails, status
+               * propagates to the individual-fit fallback below. */
+            }
+          }
+        }
       }
       if (status != RETURN_OK) {
         /* Dense solve failed, fall back to individual fits */
