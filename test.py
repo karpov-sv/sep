@@ -1183,7 +1183,7 @@ def test_psf_flux_only():
     psf = sep.PSF.from_gaussian(fwhm=fwhm)
     data = _make_gaussian_source(64, 64, 32.0, 32.0, 1000.0, fwhm)
 
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, 32.0, 32.0, psf, fit_positions=False
     )
     assert_allclose(flux, 1000.0, rtol=0.01)
@@ -1196,11 +1196,27 @@ def test_psf_fit_exact_center():
     psf = sep.PSF.from_gaussian(fwhm=fwhm)
     data = _make_gaussian_source(64, 64, 32.0, 32.0, 1000.0, fwhm)
 
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(data, 32.0, 32.0, psf)
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(data, 32.0, 32.0, psf)
     assert_allclose(flux, 1000.0, rtol=0.01)
     assert_allclose(xf, 32.0, atol=0.01)
     assert_allclose(yf, 32.0, atol=0.01)
     assert flag == 0
+
+
+def test_psf_fit_returns_chi2_and_niter():
+    """psf_fit always exposes chi2 and niter."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = _make_gaussian_source(64, 64, 32.0, 32.0, 1000.0, fwhm)
+
+    flux, fluxerr, xf, yf, flag, chi2, niter = sep.psf_fit(data, 32.0, 32.0, psf)
+    assert_allclose(flux, 1000.0, rtol=0.01)
+    assert_allclose(xf, 32.0, atol=0.01)
+    assert_allclose(yf, 32.0, atol=0.01)
+    assert flag == 0
+    assert np.isfinite(chi2)
+    assert chi2 >= 0.0
+    assert niter >= 1
 
 
 def test_psf_fit_subpixel_offsets():
@@ -1213,7 +1229,7 @@ def test_psf_fit_subpixel_offsets():
         xtrue, ytrue = 32.0 + dx, 32.0 + dy
         data = _make_gaussian_source(64, 64, xtrue, ytrue, 1000.0, fwhm)
 
-        flux, fluxerr, xf, yf, flag = sep.psf_fit(data, 32.0, 32.0, psf)
+        flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(data, 32.0, 32.0, psf)
         assert_allclose(flux, 1000.0, rtol=0.01,
                         err_msg=f"offset=({dx}, {dy})")
         assert_allclose(xf, xtrue, atol=0.01,
@@ -1234,7 +1250,7 @@ def test_psf_fit_with_noise():
         np.float32
     )
 
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, 32.0, 32.0, psf, var=noise_var
     )
     assert_allclose(flux, 1000.0, atol=50,
@@ -1259,7 +1275,7 @@ def test_psf_fit_multiple_sources():
     y = np.array([s[1] for s in sources])
     expected = np.array([s[2] for s in sources])
 
-    fout, ferr, xf, yf, flag = sep.psf_fit(data, x, y, psf)
+    fout, ferr, xf, yf, flag, _, _ = sep.psf_fit(data, x, y, psf)
     assert_allclose(fout, expected, rtol=0.01)
     assert_allclose(xf, x, atol=0.01)
     assert_allclose(yf, y, atol=0.01)
@@ -1271,7 +1287,7 @@ def test_psf_fit_different_fwhm():
         psf = sep.PSF.from_gaussian(fwhm=fw)
         data = _make_gaussian_source(64, 64, 32.2, 31.8, 1000.0, fw)
 
-        flux, _, xf, yf, _ = sep.psf_fit(data, 32.0, 32.0, psf)
+        flux, _, xf, yf, _, _, _ = sep.psf_fit(data, 32.0, 32.0, psf)
         assert_allclose(flux, 1000.0, rtol=0.01,
                         err_msg=f"FWHM={fw}")
         assert_allclose(xf, 32.2, atol=0.02,
@@ -1300,10 +1316,10 @@ def test_psf_grouped_blended_pair():
     ftrue = np.array([f1, f2])
 
     # Non-grouped: biased because the sources overlap
-    flux_ng, _, xf_ng, yf_ng, _ = sep.psf_fit(data, xa, ya, psf)
+    flux_ng, _, xf_ng, yf_ng, _, _, _ = sep.psf_fit(data, xa, ya, psf)
 
     # Grouped: simultaneous fit should deblend
-    flux_g, _, xf_g, yf_g, _ = sep.psf_fit(
+    flux_g, _, xf_g, yf_g, _, _, _ = sep.psf_fit(
         data, xa, ya, psf, grouped=True
     )
 
@@ -1322,6 +1338,81 @@ def test_psf_grouped_blended_pair():
         f"grouped error ({err_g:.1f}) should be less than "
         f"non-grouped error ({err_ng:.1f})"
     )
+
+
+def test_psf_grouped_large_component_localized():
+    """Large grouped components use the localized solver and stay accurate."""
+    fwhm = 3.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    nsrc = 80
+    spacing = 4.5
+    x = 16.0 + spacing * np.arange(nsrc, dtype=np.float64)
+    y = 48.0 + 0.35 * np.sin(np.arange(nsrc, dtype=np.float64) * 0.3)
+    flux_true = 900.0 + 120.0 * (np.arange(nsrc) % 5)
+
+    data = np.zeros((96, 400), dtype=np.float32)
+    sep.model_psf(data, x, y, flux_true, psf)
+
+    flux_ng, _, _, _, _, _, _ = sep.psf_fit(data, x, y, psf)
+    flux_g, _, xf_g, yf_g, _, _, _ = sep.psf_fit(data, x, y, psf, grouped=True)
+
+    err_ng = np.mean(np.abs(flux_ng - flux_true))
+    err_g = np.mean(np.abs(flux_g - flux_true))
+
+    assert err_g < 0.5 * err_ng
+    assert_allclose(xf_g, x, atol=0.7)
+    assert_allclose(yf_g, y, atol=0.05)
+
+
+def test_psf_grouped_close_pair_stays_non_negative():
+    """Grouped fit should avoid negative fluxes for very close noisy pairs."""
+    fwhm = 3.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    x = np.array([48.0, 48.0 + 0.5 * fwhm], dtype=np.float64)
+    y = np.array([48.0, 48.0], dtype=np.float64)
+    flux_true = np.array([1200.0, 800.0], dtype=np.float64)
+
+    rng = np.random.default_rng(1234)
+    data = np.zeros((96, 96), dtype=np.float32)
+    sep.model_psf(data, x, y, flux_true, psf)
+    data += rng.normal(0.0, 5.0, size=data.shape).astype(np.float32)
+
+    flux_g, _, xf_g, yf_g, _, _, _ = sep.psf_fit(
+        data, x, y, psf, var=25.0, grouped=True
+    )
+
+    assert np.all(flux_g >= -1.0e-8)
+    assert_allclose(np.sum(flux_g), np.sum(flux_true), rtol=0.1)
+    assert_allclose(xf_g, x, atol=0.5)
+    assert_allclose(yf_g, y, atol=0.5)
+
+
+def test_psf_grouped_returns_chi2_and_niter():
+    """Grouped psf_fit always exposes chi2 and niter."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    x = np.array([30.0, 30.0 + 1.2 * fwhm], dtype=np.float64)
+    y = np.array([32.0, 32.0], dtype=np.float64)
+    flux_true = np.array([1000.0, 800.0], dtype=np.float64)
+
+    data = np.zeros((64, 64), dtype=np.float32)
+    for cx, cy, cf in zip(x, y, flux_true):
+        data += _make_gaussian_source(64, 64, cx, cy, cf, fwhm)
+
+    flux, fluxerr, xf, yf, flag, chi2, niter = sep.psf_fit(
+        data, x, y, psf, grouped=True
+    )
+
+    assert_allclose(flux, flux_true, rtol=0.02)
+    assert_allclose(xf, x, atol=0.05)
+    assert_allclose(yf, y, atol=0.05)
+    assert np.all(np.isfinite(chi2))
+    assert np.all(chi2 >= 0.0)
+    assert np.all(niter >= 1)
+    assert np.all(flag == 0)
 
 
 def test_psf_position_varying():
@@ -1355,7 +1446,7 @@ def test_psf_position_varying():
     # Evaluate at two different positions by doing flux-only fits
     # on a point source. The effective widths should differ.
     img_narrow = _make_gaussian_source(64, 64, 32.0, 32.0, 1000.0, 3.0)
-    f1, _, _, _, _ = sep.psf_fit(
+    f1, _, _, _, _, _, _ = sep.psf_fit(
         img_narrow, 32.0, 32.0, psf, fit_positions=False
     )
 
@@ -1385,7 +1476,7 @@ def test_psf_vs_optimal_extraction():
     data = _make_gaussian_source(64, 64, 32.0, 32.0, 1000.0, fwhm)
 
     # PSF flux-only
-    flux_psf, _, _, _, _ = sep.psf_fit(
+    flux_psf, _, _, _, _, _, _ = sep.psf_fit(
         data, 32.0, 32.0, psf, fit_positions=False
     )
 
@@ -1466,7 +1557,7 @@ def test_model_psf_single_source_flux_recovery():
     x0, y0, f0 = 32.3, 31.7, 1234.5
     sep.model_psf(model, x0, y0, f0, psf)
 
-    flux, fluxerr, _, _, flag = sep.psf_fit(
+    flux, fluxerr, _, _, flag, _, _ = sep.psf_fit(
         model, x0, y0, psf, fit_positions=False
     )
     assert_allclose(flux, f0, rtol=1.0e-5)
@@ -1486,7 +1577,7 @@ def test_model_psf_broadcast_multiple_sources():
 
     sep.model_psf(model, x, y, flux, psf)
 
-    fitted, _, _, _, _ = sep.psf_fit(model, x, y, psf, fit_positions=False)
+    fitted, _, _, _, _, _, _ = sep.psf_fit(model, x, y, psf, fit_positions=False)
     assert_allclose(fitted, flux, rtol=2.0e-4)
 
 
@@ -1515,13 +1606,13 @@ def test_psf_fit_dtype_coercion():
     for dtype in [np.float32, np.float64, np.int32, np.int64]:
         x = np.array([32.0], dtype=dtype)
         y = np.array([32.0], dtype=dtype)
-        flux, fluxerr, xf, yf, flag = sep.psf_fit(
+        flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
             data, x, y, psf)
         assert_allclose(flux, 1000.0, rtol=0.02,
                         err_msg=f"dtype={dtype} gave wrong flux")
 
     # Also test scalar inputs
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, 32.0, 32.0, psf)
     assert_allclose(flux, 1000.0, rtol=0.02)
 
@@ -1555,12 +1646,12 @@ def test_psf_grouped_segmap():
     y_fit = y_src[:2].copy()
     seg_id = np.array([1, 2], dtype=np.intc)
 
-    flux_seg, _, xf, yf, flag = sep.psf_fit(
+    flux_seg, _, xf, yf, flag, _, _ = sep.psf_fit(
         data, x_fit, y_fit, psf, segmap=segmap, seg_id=seg_id,
         grouped=True, group_factor=5.0)
 
     # Without segmap, source 3's flux contaminates the fit
-    flux_noseg, _, xf2, yf2, flag2 = sep.psf_fit(
+    flux_noseg, _, xf2, yf2, flag2, _, _ = sep.psf_fit(
         data, x_fit, y_fit, psf, grouped=True, group_factor=5.0)
 
     # With segmap, flux recovery should be better (closer to true values)
@@ -1588,7 +1679,7 @@ def test_psf_grouped_flags_edge():
         data += 1000.0 * np.exp(
             -((xx - x_src[i])**2 + (yy - y_src[i])**2) / (2 * sigma**2))
 
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, x_src, y_src, psf, grouped=True, group_factor=5.0)
 
     # Interior source should have no TRUNC flag
@@ -1618,7 +1709,7 @@ def test_psf_grouped_flags_mask():
     mask = np.zeros((ny, nx), dtype=np.bool_)
     mask[62:66, 48:52] = True
 
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, x_src, y_src, psf, mask=mask,
         grouped=True, group_factor=5.0)
 
@@ -1644,13 +1735,13 @@ def test_psf_fit_multidim_segid():
                                           1000.0, fwhm)
 
     # Non-grouped with multidimensional seg_id should not raise
-    flux, fluxerr, xf, yf, flag = sep.psf_fit(
+    flux, fluxerr, xf, yf, flag, _, _ = sep.psf_fit(
         data, x, y, psf, seg_id=seg_id, grouped=False)
     assert flux.shape == (2, 2)
     assert_allclose(flux, 1000.0, rtol=0.1)
 
     # Grouped path too, for comparison
-    flux_g, _, _, _, _ = sep.psf_fit(
+    flux_g, _, _, _, _, _, _ = sep.psf_fit(
         data, x, y, psf, seg_id=seg_id, grouped=True)
     assert flux_g.shape == (2, 2)
     assert_allclose(flux_g, 1000.0, rtol=0.1)
@@ -1683,9 +1774,9 @@ def test_psf_fit_native_sampling_accuracy():
                 -((xx - xcen)**2 + (yy - ycen)**2) /
                 (2 * sigma**2)) / (2 * np.pi * sigma**2)).astype(np.float32)
 
-            flux_n, _, _, _, _ = sep.psf_fit(
+            flux_n, _, _, _, _, _, _ = sep.psf_fit(
                 data, xcen, ycen, psf_native)
-            flux_s, _, _, _, _ = sep.psf_fit(
+            flux_s, _, _, _, _, _, _ = sep.psf_fit(
                 data, xcen, ycen, psf_super)
 
             # Native-sampled should be within 2% of true flux
@@ -1725,7 +1816,7 @@ def test_psf_non_integer_sampling_no_quantization():
         -((xx - xcen)**2 + (yy - ycen)**2) /
         (2 * sigma**2)) / (2 * np.pi * sigma**2)).astype(np.float32)
 
-    flux, fluxerr, _, _, flag = sep.psf_fit(
+    flux, fluxerr, _, _, flag, _, _ = sep.psf_fit(
         data, xcen, ycen, psf, fit_positions=False)
     assert np.isfinite(flux)
     assert np.isfinite(fluxerr)
@@ -1765,7 +1856,7 @@ def test_psf_non_integer_sampling_pixel_integrated_bias():
             data = np.outer(y_int, x_int)
             data *= true_flux / data.sum()
             data = data.astype(np.float32)
-            flux, _, _, _, _ = sep.psf_fit(data, xcen, ycen, psf,
+            flux, _, _, _, _, _, _ = sep.psf_fit(data, xcen, ycen, psf,
                                            fit_positions=False)
             fracs.append(float(flux) / true_flux - 1.0)
 

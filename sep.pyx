@@ -3212,7 +3212,10 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
     grouped : bool, optional
         If True, fit overlapping sources simultaneously (default False).
     group_factor : float, optional
-        Grouping radius factor (default 2.0).
+        Local fitting halo factor for grouped fits (default 2.0). Source
+        connectivity is limited to direct stamp overlap; increasing this value
+        expands the local context used within a grouped fit without merging
+        non-overlapping sources into the same connected component.
     maxiter : int, optional
         Maximum fitting iterations (default 20).
     fit_positions : bool, optional
@@ -3230,6 +3233,11 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         Fitted y position.
     flag : `~numpy.ndarray`
         Flags.
+    chi2 : `~numpy.ndarray`
+        Reduced chi-squared for each fit. In flux-only mode
+        (``fit_positions=False``), returned as ``nan``.
+    niter : `~numpy.ndarray`
+        Number of fitting iterations. In flux-only mode, returned as 0.
     """
 
     cdef int status
@@ -3270,6 +3278,8 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         oflag = np.empty(shape, np.short)
         oxfit = np.broadcast_to(x, shape).copy().astype(dt)
         oyfit = np.broadcast_to(y, shape).copy().astype(dt)
+        ochi2 = np.full(shape, np.nan, dtype=dt)
+        oniter = np.zeros(shape, dtype=np.intc)
 
         it = np.broadcast(x, y, seg_id, oflux, ofluxerr, oflag)
         while np.PyArray_MultiIter_NOTDONE(it):
@@ -3286,7 +3296,7 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
             _assert_ok(status)
             np.PyArray_MultiIter_NEXT(it)
 
-        return oflux, ofluxerr, oxfit, oyfit, oflag
+        return oflux, ofluxerr, oxfit, oyfit, oflag, ochi2, oniter
 
     if grouped:
         # Grouped path: flatten arrays, call multi
@@ -3331,7 +3341,9 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
                 np.asarray(gfluxerr).reshape(shape),
                 np.asarray(gxfit).reshape(shape),
                 np.asarray(gyfit).reshape(shape),
-                np.asarray(gflag).astype(np.short).reshape(shape))
+                np.asarray(gflag).astype(np.short).reshape(shape),
+                np.asarray(gchi2).reshape(shape),
+                np.asarray(gniter).astype(np.intc).reshape(shape))
 
     else:
         # Non-grouped: batch call to C loop
@@ -3377,4 +3389,6 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
                 np.asarray(gfluxerr).reshape(shape),
                 np.asarray(gxfit).reshape(shape),
                 np.asarray(gyfit).reshape(shape),
-                np.asarray(gflag).astype(np.short).reshape(shape))
+                np.asarray(gflag).astype(np.short).reshape(shape),
+                np.asarray(gchi2).reshape(shape),
+                np.asarray(gniter).astype(np.intc).reshape(shape))

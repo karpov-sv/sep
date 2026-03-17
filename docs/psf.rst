@@ -56,17 +56,18 @@ resampled stamp is normalized before flux estimation/fitting.
 Running PSF photometry
 ----------------------
 
-`sep.psf_fit` returns ``flux``, ``fluxerr``, fitted positions, and flags:
+`sep.psf_fit` returns ``flux``, ``fluxerr``, fitted positions, flags,
+reduced chi-squared, and iteration counts:
 
 .. code-block:: python
 
-    flux, fluxerr, xfit, yfit, flag = sep.psf_fit(data, x, y, psf)
+    flux, fluxerr, xfit, yfit, flag, chi2, niter = sep.psf_fit(data, x, y, psf)
 
 Use ``fit_positions=False`` for flux-only mode at fixed input positions:
 
 .. code-block:: python
 
-    flux, fluxerr, xfit, yfit, flag = sep.psf_fit(
+    flux, fluxerr, xfit, yfit, flag, chi2, niter = sep.psf_fit(
         data, x, y, psf, fit_positions=False
     )
 
@@ -78,6 +79,9 @@ In flux-only mode, SEP computes the optimal-extraction estimator
 
 where :math:`P_i` is the resampled PSF, :math:`D_i` is data, and :math:`V_i`
 is per-pixel variance.
+
+In flux-only mode, ``chi2`` is returned as ``nan`` and ``niter`` as 0 because
+no iterative position fit is performed.
 
 With ``fit_positions=True`` (default), SEP iteratively solves for flux and
 subpixel shifts ``(dx, dy)`` using a linearized least-squares model per
@@ -103,13 +107,20 @@ Set ``grouped=True`` to fit overlapping sources simultaneously:
 
 .. code-block:: python
 
-    flux, fluxerr, xfit, yfit, flag = sep.psf_fit(
+    flux, fluxerr, xfit, yfit, flag, chi2, niter = sep.psf_fit(
         data, x, y, psf, grouped=True, group_factor=2.0
     )
 
-Sources are grouped by stamp overlap and each group is solved jointly.
-This generally improves deblending relative to fitting each source
-independently.
+Sources are grouped by direct stamp overlap and each group is solved jointly.
+For small groups SEP uses an exact simultaneous fit. Large connected
+components are handled with overlapping local fits that reuse neighbor
+parameters between passes.
+
+``group_factor`` controls the local fitting halo, not the connectivity graph.
+Values larger than 1 therefore expand the local context used for the fit
+without merging sources that do not directly overlap. This avoids the
+pathological giant-group behavior that can occur in crowded fields when a
+single radius is used for both grouping and fitting extent.
 
 Error model, masks, and flags
 -----------------------------
