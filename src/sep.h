@@ -153,6 +153,11 @@ typedef struct {
   double * fit_covmat; /* PSF_NA * PSF_NA */
   double * svd_rv1; /* PSF_NA (for svdfit) */
   double * svd_tmp; /* PSF_NA (for svdfit) */
+
+  /* Fitting radius: if > 0, only pixels within this radius of the source
+   * center participate in PSF photometry (both flux-only and full fitting).
+   * Units are native image pixels.  A value of 0 means use the full stamp. */
+  double fit_radius;
 } sep_psf;
 
 /* sep_catalog
@@ -788,6 +793,7 @@ SEP_API int sep_psf_fit_multi(
     double group_factor,
     short inflag,
     int maxiter,
+    int fit_positions,
     double * flux,
     double * fluxerr,
     double * xfit,

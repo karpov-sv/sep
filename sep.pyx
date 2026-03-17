@@ -270,6 +270,7 @@ cdef extern from "sep.h":
         float *loc
         float *resi
         int rw, rh
+        double fit_radius
 
     int sep_psf_create(sep_psf **psf,
                        const float *data, int w, int h, int ncomp,
@@ -300,7 +301,7 @@ cdef extern from "sep.h":
     int sep_psf_fit_multi(const sep_image *im, sep_psf *psf,
                           const double *x, const double *y, np.int64_t n,
                           const int *id, double group_factor,
-                          short inflag, int maxiter,
+                          short inflag, int maxiter, int fit_positions,
                           double *flux, double *fluxerr,
                           double *xfit, double *yfit,
                           double *xerr, double *yerr,
@@ -3050,6 +3051,15 @@ cdef class PSF:
         def __get__(self):
             return self.ptr.rh
 
+    property fit_radius:
+        """Fitting radius in image pixels. If > 0, only pixels within this
+        radius of the source center participate in PSF photometry. 0 means
+        use the full stamp (default)."""
+        def __get__(self):
+            return self.ptr.fit_radius
+        def __set__(self, double value):
+            self.ptr.fit_radius = value
+
     @classmethod
     def from_gaussian(cls, double fwhm, int size=0, int oversampling=2):
         """Create a PSF model from a circular Gaussian profile.
@@ -3181,7 +3191,8 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
             double maskthresh=0.0,
             seg_id=None, np.ndarray segmap=None,
             bint grouped=False, double group_factor=2.0,
-            int maxiter=20, bint fit_positions=True):
+            int maxiter=20, bint fit_positions=True,
+            double fit_radius=0.0):
     """psf_fit(data, x, y, psf, ...)
 
     Fit a PSF model to sources in image data.
@@ -3211,6 +3222,8 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         Segmentation map.
     grouped : bool, optional
         If True, fit overlapping sources simultaneously (default False).
+        When combined with ``fit_positions=False``, uses grouped NNLS
+        flux solver at fixed positions for deblending in crowded fields.
     group_factor : float, optional
         Local fitting halo factor for grouped fits (default 2.0). Source
         connectivity is limited to direct stamp overlap; increasing this value
@@ -3220,6 +3233,11 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         Maximum fitting iterations (default 20).
     fit_positions : bool, optional
         If True, fit positions as well as fluxes (default True).
+    fit_radius : float, optional
+        If > 0, only pixels within this radius (in image pixels) of the
+        source center participate in the fit. Reduces neighbor contamination
+        by limiting the effective stamp size. A value of 0 means use the
+        full PSF stamp (default 0.0). Typical values: 2-3 * FWHM.
 
     Returns
     -------
@@ -3254,11 +3272,18 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
     cdef np.ndarray[np.int32_t, ndim=1, mode="c"] gniter
     cdef np.ndarray[np.int16_t, ndim=1, mode="c"] gflag
 
+    cdef double old_fit_radius
+
     _parse_arrays(data, err, var, mask, segmap, &im)
     im.maskthresh = maskthresh
 
     if gain is not None:
         im.gain = gain
+
+    # Temporarily override fit_radius on PSF.  The parameter always takes
+    # precedence (0.0 means "full stamp" regardless of psf.fit_radius).
+    old_fit_radius = psf.ptr.fit_radius
+    psf.ptr.fit_radius = fit_radius
 
     # Coerce coordinate inputs to correct dtypes for safe pointer casts
     x = np.asarray(x, dtype=np.float64)
@@ -3271,124 +3296,128 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
     dt = np.float64
     shape = np.broadcast(x, y).shape
 
-    if not fit_positions:
-        # Flux-only mode: use sep_sum_psf
-        oflux = np.empty(shape, dt)
-        ofluxerr = np.empty(shape, dt)
-        oflag = np.empty(shape, np.short)
-        oxfit = np.broadcast_to(x, shape).copy().astype(dt)
-        oyfit = np.broadcast_to(y, shape).copy().astype(dt)
-        ochi2 = np.full(shape, np.nan, dtype=dt)
-        oniter = np.zeros(shape, dtype=np.intc)
+    try:
+        if not fit_positions and not grouped:
+            # Flux-only ungrouped mode: use sep_sum_psf per source
+            oflux = np.empty(shape, dt)
+            ofluxerr = np.empty(shape, dt)
+            oflag = np.empty(shape, np.short)
+            oxfit = np.broadcast_to(x, shape).copy().astype(dt)
+            oyfit = np.broadcast_to(y, shape).copy().astype(dt)
+            ochi2 = np.full(shape, np.nan, dtype=dt)
+            oniter = np.zeros(shape, dtype=np.intc)
 
-        it = np.broadcast(x, y, seg_id, oflux, ofluxerr, oflag)
-        while np.PyArray_MultiIter_NOTDONE(it):
-            status = sep_sum_psf(
+            it = np.broadcast(x, y, seg_id, oflux, ofluxerr, oflag)
+            while np.PyArray_MultiIter_NOTDONE(it):
+                status = sep_sum_psf(
+                    &im, psf.ptr,
+                    (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                    (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                    (<int*>np.PyArray_MultiIter_DATA(it, 2))[0],
+                    0,
+                    <double*>np.PyArray_MultiIter_DATA(it, 3),
+                    <double*>np.PyArray_MultiIter_DATA(it, 4),
+                    &area1,
+                    <short*>np.PyArray_MultiIter_DATA(it, 5))
+                _assert_ok(status)
+                np.PyArray_MultiIter_NEXT(it)
+
+            return oflux, ofluxerr, oxfit, oyfit, oflag, ochi2, oniter
+
+        if grouped:
+            # Grouped path: flatten arrays, call multi
+            gx = np.ascontiguousarray(
+                np.broadcast_to(x, shape).ravel(), dtype=np.float64)
+            gy = np.ascontiguousarray(
+                np.broadcast_to(y, shape).ravel(), dtype=np.float64)
+            gid = np.ascontiguousarray(
+                np.broadcast_to(seg_id, shape).ravel(), dtype=np.intc)
+
+            npts = gx.shape[0]
+            gflux = np.empty(npts, dtype=np.float64)
+            gfluxerr = np.empty(npts, dtype=np.float64)
+            gxfit = np.empty(npts, dtype=np.float64)
+            gyfit = np.empty(npts, dtype=np.float64)
+            gxerr = np.empty(npts, dtype=np.float64)
+            gyerr = np.empty(npts, dtype=np.float64)
+            gniter = np.empty(npts, dtype=np.intc)
+            gchi2 = np.empty(npts, dtype=np.float64)
+            gflag = np.empty(npts, dtype=np.int16)
+
+            status = sep_psf_fit_multi(
                 &im, psf.ptr,
-                (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
-                (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
-                (<int*>np.PyArray_MultiIter_DATA(it, 2))[0],
-                0,
-                <double*>np.PyArray_MultiIter_DATA(it, 3),
-                <double*>np.PyArray_MultiIter_DATA(it, 4),
-                &area1,
-                <short*>np.PyArray_MultiIter_DATA(it, 5))
+                <double*>gx.data,
+                <double*>gy.data,
+                npts,
+                <int*>gid.data,
+                group_factor,
+                0, maxiter,
+                1 if fit_positions else 0,
+                <double*>gflux.data,
+                <double*>gfluxerr.data,
+                <double*>gxfit.data,
+                <double*>gyfit.data,
+                <double*>gxerr.data,
+                <double*>gyerr.data,
+                <int*>gniter.data,
+                <double*>gchi2.data,
+                <short*>gflag.data)
             _assert_ok(status)
-            np.PyArray_MultiIter_NEXT(it)
 
-        return oflux, ofluxerr, oxfit, oyfit, oflag, ochi2, oniter
+            return (np.asarray(gflux).reshape(shape),
+                    np.asarray(gfluxerr).reshape(shape),
+                    np.asarray(gxfit).reshape(shape),
+                    np.asarray(gyfit).reshape(shape),
+                    np.asarray(gflag).astype(np.short).reshape(shape),
+                    np.asarray(gchi2).reshape(shape),
+                    np.asarray(gniter).astype(np.intc).reshape(shape))
 
-    if grouped:
-        # Grouped path: flatten arrays, call multi
-        gx = np.ascontiguousarray(
-            np.broadcast_to(x, shape).ravel(), dtype=np.float64)
-        gy = np.ascontiguousarray(
-            np.broadcast_to(y, shape).ravel(), dtype=np.float64)
-        gid = np.ascontiguousarray(
-            np.broadcast_to(seg_id, shape).ravel(), dtype=np.intc)
+        else:
+            # Non-grouped: batch call to C loop
+            # Use atleast_1d to handle scalar shape (shape=())
+            ashape = shape if len(shape) > 0 else (1,)
+            gx = np.ascontiguousarray(
+                np.broadcast_to(x, ashape).ravel(), dtype=np.float64)
+            gy = np.ascontiguousarray(
+                np.broadcast_to(y, ashape).ravel(), dtype=np.float64)
+            gid = np.ascontiguousarray(
+                np.broadcast_to(seg_id, ashape).ravel(), dtype=np.intc)
 
-        npts = gx.shape[0]
-        gflux = np.empty(npts, dtype=np.float64)
-        gfluxerr = np.empty(npts, dtype=np.float64)
-        gxfit = np.empty(npts, dtype=np.float64)
-        gyfit = np.empty(npts, dtype=np.float64)
-        gxerr = np.empty(npts, dtype=np.float64)
-        gyerr = np.empty(npts, dtype=np.float64)
-        gniter = np.empty(npts, dtype=np.intc)
-        gchi2 = np.empty(npts, dtype=np.float64)
-        gflag = np.empty(npts, dtype=np.int16)
+            npts = gx.shape[0]
+            gflux = np.empty(npts, dtype=np.float64)
+            gfluxerr = np.empty(npts, dtype=np.float64)
+            gxfit = np.empty(npts, dtype=np.float64)
+            gyfit = np.empty(npts, dtype=np.float64)
+            gxerr = np.empty(npts, dtype=np.float64)
+            gyerr = np.empty(npts, dtype=np.float64)
+            gniter = np.empty(npts, dtype=np.intc)
+            gchi2 = np.empty(npts, dtype=np.float64)
+            gflag = np.empty(npts, dtype=np.int16)
 
-        status = sep_psf_fit_multi(
-            &im, psf.ptr,
-            <double*>gx.data,
-            <double*>gy.data,
-            npts,
-            <int*>gid.data,
-            group_factor,
-            0, maxiter,
-            <double*>gflux.data,
-            <double*>gfluxerr.data,
-            <double*>gxfit.data,
-            <double*>gyfit.data,
-            <double*>gxerr.data,
-            <double*>gyerr.data,
-            <int*>gniter.data,
-            <double*>gchi2.data,
-            <short*>gflag.data)
-        _assert_ok(status)
+            status = sep_psf_fit_array(
+                &im, psf.ptr,
+                <double*>gx.data,
+                <double*>gy.data,
+                npts,
+                <int*>gid.data,
+                0, maxiter,
+                <double*>gflux.data,
+                <double*>gfluxerr.data,
+                <double*>gxfit.data,
+                <double*>gyfit.data,
+                <double*>gxerr.data,
+                <double*>gyerr.data,
+                <int*>gniter.data,
+                <double*>gchi2.data,
+                <short*>gflag.data)
+            _assert_ok(status)
 
-        return (np.asarray(gflux).reshape(shape),
-                np.asarray(gfluxerr).reshape(shape),
-                np.asarray(gxfit).reshape(shape),
-                np.asarray(gyfit).reshape(shape),
-                np.asarray(gflag).astype(np.short).reshape(shape),
-                np.asarray(gchi2).reshape(shape),
-                np.asarray(gniter).astype(np.intc).reshape(shape))
-
-    else:
-        # Non-grouped: batch call to C loop
-        # Use atleast_1d to handle scalar shape (shape=())
-        ashape = shape if len(shape) > 0 else (1,)
-        gx = np.ascontiguousarray(
-            np.broadcast_to(x, ashape).ravel(), dtype=np.float64)
-        gy = np.ascontiguousarray(
-            np.broadcast_to(y, ashape).ravel(), dtype=np.float64)
-        gid = np.ascontiguousarray(
-            np.broadcast_to(seg_id, ashape).ravel(), dtype=np.intc)
-
-        npts = gx.shape[0]
-        gflux = np.empty(npts, dtype=np.float64)
-        gfluxerr = np.empty(npts, dtype=np.float64)
-        gxfit = np.empty(npts, dtype=np.float64)
-        gyfit = np.empty(npts, dtype=np.float64)
-        gxerr = np.empty(npts, dtype=np.float64)
-        gyerr = np.empty(npts, dtype=np.float64)
-        gniter = np.empty(npts, dtype=np.intc)
-        gchi2 = np.empty(npts, dtype=np.float64)
-        gflag = np.empty(npts, dtype=np.int16)
-
-        status = sep_psf_fit_array(
-            &im, psf.ptr,
-            <double*>gx.data,
-            <double*>gy.data,
-            npts,
-            <int*>gid.data,
-            0, maxiter,
-            <double*>gflux.data,
-            <double*>gfluxerr.data,
-            <double*>gxfit.data,
-            <double*>gyfit.data,
-            <double*>gxerr.data,
-            <double*>gyerr.data,
-            <int*>gniter.data,
-            <double*>gchi2.data,
-            <short*>gflag.data)
-        _assert_ok(status)
-
-        return (np.asarray(gflux).reshape(shape),
-                np.asarray(gfluxerr).reshape(shape),
-                np.asarray(gxfit).reshape(shape),
-                np.asarray(gyfit).reshape(shape),
-                np.asarray(gflag).astype(np.short).reshape(shape),
-                np.asarray(gchi2).reshape(shape),
-                np.asarray(gniter).astype(np.intc).reshape(shape))
+            return (np.asarray(gflux).reshape(shape),
+                    np.asarray(gfluxerr).reshape(shape),
+                    np.asarray(gxfit).reshape(shape),
+                    np.asarray(gyfit).reshape(shape),
+                    np.asarray(gflag).astype(np.short).reshape(shape),
+                    np.asarray(gchi2).reshape(shape),
+                    np.asarray(gniter).astype(np.intc).reshape(shape))
+    finally:
+        psf.ptr.fit_radius = old_fit_radius

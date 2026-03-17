@@ -1415,6 +1415,74 @@ def test_psf_grouped_returns_chi2_and_niter():
     assert np.all(flag == 0)
 
 
+def test_psf_grouped_fit_radius_recovers_positions():
+    """Grouped fit_radius should not bias position updates in exact fits."""
+    fwhm = 3.5
+    fit_radius = 3.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    x_true = np.array([30.35, 34.35], dtype=np.float64)
+    y_true = np.array([31.75, 32.20], dtype=np.float64)
+    flux_true = np.array([1100.0, 700.0], dtype=np.float64)
+    x_init = x_true + np.array([0.30, -0.25], dtype=np.float64)
+    y_init = y_true + np.array([-0.20, 0.25], dtype=np.float64)
+
+    data = np.zeros((64, 64), dtype=np.float32)
+    sep.model_psf(data, x_true, y_true, flux_true, psf)
+
+    flux, _, xf, yf, flag, chi2, niter = sep.psf_fit(
+        data, x_init, y_init, psf, grouped=True, fit_radius=fit_radius
+    )
+
+    assert_allclose(flux, flux_true, rtol=0.05)
+    assert_allclose(xf, x_true, atol=0.05)
+    assert_allclose(yf, y_true, atol=0.05)
+    assert np.all(np.isfinite(chi2))
+    assert np.all(niter >= 1)
+    assert np.all(flag == 0)
+
+
+def test_psf_grouped_fit_radius_chi2_matches_masked_residual():
+    """Grouped chi2 should use the same fit_radius-limited pixels as the fit."""
+    rng = np.random.default_rng(123)
+    fwhm = 3.0
+    fit_radius = 2.5
+    var = 16.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    x = np.array([30.2, 33.1], dtype=np.float64)
+    y = np.array([31.8, 32.4], dtype=np.float64)
+    flux_true = np.array([1000.0, 850.0], dtype=np.float64)
+
+    data = np.zeros((64, 64), dtype=np.float32)
+    sep.model_psf(data, x, y, flux_true, psf)
+    data += rng.normal(0.0, np.sqrt(var), size=data.shape).astype(np.float32)
+
+    flux, _, xf, yf, flag, chi2, niter = sep.psf_fit(
+        data, x, y, psf, grouped=True, var=var, fit_radius=fit_radius
+    )
+
+    model = np.zeros_like(data, dtype=np.float32)
+    yy, xx = np.indices(data.shape, dtype=np.float64)
+    for fi, xi, yi in zip(flux, xf, yf):
+        tmp = np.zeros_like(data, dtype=np.float32)
+        sep.model_psf(tmp, [xi], [yi], [fi], psf)
+        mask = (xx - xi) ** 2 + (yy - yi) ** 2 <= fit_radius ** 2
+        model[mask] += tmp[mask]
+    resid = data - model
+
+    manual = np.empty_like(chi2)
+    for i in range(len(xf)):
+        mask = (xx - xf[i]) ** 2 + (yy - yf[i]) ** 2 <= fit_radius ** 2
+        ngood = int(np.count_nonzero(mask))
+        chi2sum = float(np.sum((resid[mask] ** 2) / var))
+        manual[i] = chi2sum / (ngood - 3)
+
+    assert np.all(flag == 0)
+    assert np.all(niter >= 1)
+    assert_allclose(chi2, manual, rtol=1.0e-6, atol=1.0e-6)
+
+
 def test_psf_position_varying():
     """Position-varying PSF (degree=1) produces different stamps at
     different image positions."""
