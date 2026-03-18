@@ -1276,6 +1276,67 @@ def test_psf_from_gaussian():
     assert psf.fwhm == 3.5
 
 
+def test_winpos_psf_requires_sig_or_psf():
+    """winpos requires either Gaussian sigma or a PSF model."""
+    data = np.zeros((16, 16), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="`sig` is required"):
+        sep.winpos(data, [8.0], [8.0])
+
+
+def test_winpos_psf_weighting_tracks_supplied_psf():
+    """PSF-weighted winpos works with a supplied supersampled PSF model."""
+    fwhm = 3.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm, oversampling=4)
+
+    data = np.zeros((96, 96), dtype=np.float32)
+    xtrue = 48.35
+    ytrue = 47.65
+    sep.model_psf(data, [xtrue], [ytrue], [1500.0], psf)
+
+    xinit = np.array([xtrue + 0.45], dtype=np.float64)
+    yinit = np.array([ytrue - 0.35], dtype=np.float64)
+
+    xg, yg, _ = sep.winpos(data, xinit, yinit, fwhm / 2.354820045)
+    xp, yp, flag = sep.winpos(data, xinit, yinit, psf=psf, maxstep=0.8)
+
+    assert flag[0] == 0
+    assert np.hypot(xp[0] - xtrue, yp[0] - ytrue) < 0.01
+    assert_allclose(xp, xg, atol=2.0e-3)
+    assert_allclose(yp, yg, atol=2.0e-3)
+
+
+def test_winpos_psf_array_matches_scalar_calls():
+    """Batched PSF-weighted winpos matches per-source calls."""
+    fwhm = 4.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm, oversampling=4)
+    data = np.zeros((96, 96), dtype=np.float32)
+    xtrue = np.array([22.3, 48.2, 71.7], dtype=np.float64)
+    ytrue = np.array([24.6, 44.1, 68.4], dtype=np.float64)
+    flux = np.array([1200.0, 900.0, 1500.0], dtype=np.float64)
+    sep.model_psf(data, xtrue, ytrue, flux, psf)
+
+    xinit = xtrue + np.array([0.35, -0.28, 0.22])
+    yinit = ytrue + np.array([-0.18, 0.31, -0.27])
+    maxstep = np.array([0.6, 0.8, 0.7], dtype=np.float64)
+
+    xb, yb, flagb = sep.winpos(data, xinit, yinit, psf=psf, maxstep=maxstep)
+
+    xs = np.empty_like(xb)
+    ys = np.empty_like(yb)
+    flags = np.empty_like(flagb)
+    for i in range(len(xinit)):
+        x1, y1, f1 = sep.winpos(data, xinit[i], yinit[i], psf=psf,
+                                maxstep=maxstep[i])
+        xs[i] = x1
+        ys[i] = y1
+        flags[i] = f1
+
+    assert_allclose(xb, xs, atol=1.0e-10)
+    assert_allclose(yb, ys, atol=1.0e-10)
+    assert_equal(flagb, flags)
+
+
 def test_psf_flux_only():
     """PSF flux-only photometry recovers flux at the exact position."""
     fwhm = 3.5

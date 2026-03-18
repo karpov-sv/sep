@@ -99,6 +99,12 @@ Build and install in the usual place:
 python -m pip install --editable .
 ```
 
+To enable OpenMP acceleration for supported batched routines, build with:
+
+```
+SEP_USE_OPENMP=1 python -m pip install --editable .
+```
+
 **Run tests:** Tests require the [pytest](http://pytest.org) Python
 package. To run the tests, execute `./test.py` in the top-level
 directory. Some tests require a FITS reader (either fitsio or astropy)

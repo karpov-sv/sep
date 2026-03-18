@@ -240,6 +240,16 @@ cdef extern from "sep.h":
                      double x, double y, double sig,
                      int subpix, short inflag, int id, double maxstep,
                      double *xout, double *yout, int *niter, short *flag)
+    int sep_windowed_psf(const sep_image *image, sep_psf *psf,
+                         double x, double y,
+                         short inflag, int id, double maxstep,
+                         double *xout, double *yout, int *niter, short *flag)
+    int sep_windowed_psf_array(const sep_image *image, sep_psf *psf,
+                               const double *x, const double *y, np.int64_t n,
+                               const int *id, short inflag,
+                               const double *maxstep,
+                               double *xout, double *yout,
+                               int *niter, short *flag)
 
     int sep_ellipse_axes(double cxx, double cyy, double cxy,
                          double *a, double *b, double *theta)
@@ -310,6 +320,8 @@ cdef extern from "sep.h":
 
     void sep_get_errmsg(int status, char *errtext)
     void sep_get_errdetail(char *errtext)
+
+cdef class PSF
 
 # -----------------------------------------------------------------------------
 # Utility functions
@@ -2679,23 +2691,23 @@ def kron_radius(np.ndarray data not None, x, y, a, b, theta, r,
 
     return kr, flag
 
-def winpos(np.ndarray data not None, xinit, yinit, sig,
+def winpos(np.ndarray data not None, xinit, yinit, sig=None,
            np.ndarray mask=None, double maskthresh=0.0, int subpix=11,
            double minsig=2.0/2.35*0.5, seg_id=None, np.ndarray segmap=None,
-           maxstep=None):
-    """winpos(data, xinit, yinit, sig, mask=None, maskthresh=0.0, subpix=11,
-              minsig=2.0/2.35*0.5, seg_id=None, segmap=None, maxstep=None)
+           maxstep=None, PSF psf=None):
+    """winpos(data, xinit, yinit, sig=None, mask=None, maskthresh=0.0,
+              subpix=11, minsig=2.0/2.35*0.5, seg_id=None, segmap=None,
+              maxstep=None, psf=None)
 
     Calculate more accurate object centroids using 'windowed' algorithm.
 
     Starting from the supplied initial center position, an iterative
     algorithm is used to determine a better object centroid. On each
-    iteration, the centroid is calculated using all pixels within a
-    circular aperture of ``4*sig`` from the current position,
-    weighting pixel positions by their flux and the amplitude of a 2-d
-    Gaussian with sigma ``sig``. Iteration stops when the change in
-    position falls under some threshold or a maximum number of
-    iterations is reached. This is equivalent to ``XWIN_IMAGE`` and
+    iteration, the centroid is calculated from pixels around the current
+    position with either Gaussian weighting or, if ``psf`` is supplied,
+    the resampled PSF model itself. Iteration stops when the change in
+    position falls under some threshold or a maximum number of iterations
+    is reached. The Gaussian mode is equivalent to ``XWIN_IMAGE`` and
     ``YWIN_IMAGE`` parameters in Source Extractor (for the correct choice
     of sigma for each object).
 
@@ -2711,9 +2723,10 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     xinit, yinit : array_like
         Initial center(s).
 
-    sig : array_like
+    sig : array_like, optional
         Gaussian sigma used for weighting pixels. Pixels within a circular
-        aperture of radius 4*sig are included.
+        aperture of radius 4*sig are included. Required unless ``psf`` is
+        supplied. Ignored when ``psf`` is supplied.
 
     mask : `numpy.ndarray`, optional
         An optional mask.
@@ -2724,13 +2737,14 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     subpix : int, optional
         Subpixel sampling used to determine pixel overlap with
         aperture.  11 is used in Source Extractor. For exact overlap
-        calculation, use 0.
+        calculation, use 0. Ignored when ``psf`` is supplied.
 
     minsig : float, optional
         Minimum bound on ``sig`` parameter. ``sig`` values smaller than this
         are increased to ``minsig`` to replicate Source Extractor behavior.
         Source Extractor uses a minimum half-light radius of 0.5 pixels,
-        equivalent to a sigma of 0.5 * 2.0 / 2.35.
+        equivalent to a sigma of 0.5 * 2.0 / 2.35. Ignored when ``psf`` is
+        supplied.
 
     segmap : `~numpy.ndarray`, optional
         Segmentation image with dimensions of ``data`` and dtype ``np.int32``.
@@ -2752,6 +2766,12 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
         Maximum step size per iteration in pixels. If ``None`` or <= 0,
         no step limiting is applied.
 
+    psf : `PSF`, optional
+        If supplied, use the evaluated and resampled PSF model as the
+        centroid weighting function instead of a Gaussian window. This is
+        useful when centroiding should follow the same PSF model used for
+        optimal extraction or PSF fitting.
+
     Returns
     -------
     x, y : np.ndarray
@@ -2763,10 +2783,16 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     """
 
     cdef int status
-    cdef double cxx, cyy, cxy, sigval
+    cdef double sigval
     cdef double maxstepval
     cdef int niter = 0  # not currently returned
     cdef sep_image im
+    cdef object shape
+    cdef np.ndarray xarr, yarr, maxsteparr, segidarr
+    cdef np.ndarray[np.float64_t, ndim=1, mode='c'] xbuf, ybuf, maxstepbuf
+    cdef np.ndarray[np.float64_t, ndim=1, mode='c'] xoutbuf, youtbuf
+    cdef np.ndarray[np.int32_t, ndim=1, mode='c'] segidbuf, niterarr
+    cdef np.ndarray[np.int16_t, ndim=1, mode='c'] flagbuf
 
     # Test for segmap without seg_id.  Nothing happens if seg_id supplied but
     # without segmap.
@@ -2780,44 +2806,79 @@ def winpos(np.ndarray data not None, xinit, yinit, sig,
     dt = np.dtype(np.double)
     xinit = np.require(xinit, dtype=dt)
     yinit = np.require(yinit, dtype=dt)
-    sig = np.require(sig, dtype=dt)
+    if psf is None:
+        if sig is None:
+            raise ValueError('`sig` is required unless `psf` is supplied.')
+        sig = np.require(sig, dtype=dt)
     if maxstep is None:
         maxstep = 0.0
     maxstep = np.require(maxstep, dtype=dt)
 
+    if psf is None:
+        shape = np.broadcast(xinit, yinit, sig, maxstep).shape
+    else:
+        shape = np.broadcast(xinit, yinit, maxstep).shape
+
     # Segmentation image and ids with same dimensions as xinit, yinit, etc.
     if seg_id is not None:
         seg_id = np.require(seg_id, dtype=np.int32)
-        if seg_id.shape != xinit.shape:
+        if seg_id.shape != shape:
             raise ValueError('Shapes of `xinit` and `seg_id` do not match')
     else:
-        seg_id = np.zeros(len(xinit), dtype=np.int32)
+        seg_id = np.zeros(shape, dtype=np.int32)
 
     # allocate output arrays
-    shape = np.broadcast(xinit, yinit, sig).shape
     x = np.empty(shape, np.float64)
     y = np.empty(shape, np.float64)
     flag = np.empty(shape, np.short)
 
-    it = np.broadcast(xinit, yinit, sig, maxstep, seg_id, x, y, flag)
-    while np.PyArray_MultiIter_NOTDONE(it):
-        sigval = (<double*>np.PyArray_MultiIter_DATA(it, 2))[0]
-        maxstepval = (<double*>np.PyArray_MultiIter_DATA(it, 3))[0]
-        if sigval < minsig:
-            sigval = minsig
-        status = sep_windowed(&im,
-                              (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
-                              (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
-                              sigval,
-                              subpix, 0,
-                              (<int*>np.PyArray_MultiIter_DATA(it, 4))[0],
-                              maxstepval,
-                              <double*>np.PyArray_MultiIter_DATA(it, 5),
-                              <double*>np.PyArray_MultiIter_DATA(it, 6),
-                              &niter,
-                              <short*>np.PyArray_MultiIter_DATA(it, 7))
+    if psf is None:
+        it = np.broadcast(xinit, yinit, sig, maxstep, seg_id, x, y, flag)
+        while np.PyArray_MultiIter_NOTDONE(it):
+            sigval = (<double*>np.PyArray_MultiIter_DATA(it, 2))[0]
+            maxstepval = (<double*>np.PyArray_MultiIter_DATA(it, 3))[0]
+            if sigval < minsig:
+                sigval = minsig
+            status = sep_windowed(&im,
+                                  (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
+                                  (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
+                                  sigval,
+                                  subpix, 0,
+                                  (<int*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                                  maxstepval,
+                                  <double*>np.PyArray_MultiIter_DATA(it, 5),
+                                  <double*>np.PyArray_MultiIter_DATA(it, 6),
+                                  &niter,
+                                  <short*>np.PyArray_MultiIter_DATA(it, 7))
+            _assert_ok(status)
+            np.PyArray_MultiIter_NEXT(it)
+    else:
+        xarr, yarr, maxsteparr = np.broadcast_arrays(xinit, yinit, maxstep)
+        xbuf = np.ascontiguousarray(xarr, dtype=dt).reshape(-1)
+        ybuf = np.ascontiguousarray(yarr, dtype=dt).reshape(-1)
+        maxstepbuf = np.ascontiguousarray(maxsteparr, dtype=dt).reshape(-1)
+        segidbuf = np.ascontiguousarray(seg_id, dtype=np.intc).reshape(-1)
+        xoutbuf = np.empty(xbuf.size, dtype=np.float64)
+        youtbuf = np.empty(ybuf.size, dtype=np.float64)
+        flagbuf = np.empty(xbuf.size, dtype=np.int16)
+        niterarr = np.empty(xbuf.size, dtype=np.intc)
+
+        status = sep_windowed_psf_array(&im,
+                                        psf.ptr,
+                                        <double*>xbuf.data,
+                                        <double*>ybuf.data,
+                                        xbuf.size,
+                                        <int*>segidbuf.data,
+                                        0,
+                                        <double*>maxstepbuf.data,
+                                        <double*>xoutbuf.data,
+                                        <double*>youtbuf.data,
+                                        <int*>niterarr.data,
+                                        <short*>flagbuf.data)
         _assert_ok(status)
-        np.PyArray_MultiIter_NEXT(it)
+        x = xoutbuf.reshape(shape)
+        y = youtbuf.reshape(shape)
+        flag = flagbuf.reshape(shape)
 
     return x, y, flag
 

@@ -644,6 +644,61 @@ SEP_API int sep_windowed(
     short * flag
 );
 
+/* sep_windowed_psf()
+ *
+ * Calculate "windowed" position parameters using a supplied PSF model
+ * as the weighting function. The PSF is evaluated at the current position
+ * on each iteration and the centroid update is computed over the native
+ * PSF stamp.
+ *
+ * x, y       : initial center
+ * psf        : PSF model used for weighting.
+ * id         : Segmentation id for masking (see sep_sum_circle semantics).
+ * maxstep    : Maximum step size per iteration. <= 0 disables limiting.
+ * xout, yout : output center.
+ * niter      : number of iterations used.
+ */
+SEP_API int sep_windowed_psf(
+    const sep_image * im,
+    sep_psf * psf,
+    double x,
+    double y,
+    short inflag,
+    int id,
+    double maxstep,
+    double * xout,
+    double * yout,
+    int * niter,
+    short * flag
+);
+
+/* sep_windowed_psf_array()
+ *
+ * Batch version of sep_windowed_psf() for multiple sources.
+ *
+ * x, y       : initial centers
+ * n          : number of sources
+ * id         : optional segmentation ids (may be NULL)
+ * maxstep    : per-source maximum step sizes
+ * xout, yout : output centers
+ * niter      : number of iterations used per source
+ * flag       : per-source flags
+ */
+SEP_API int sep_windowed_psf_array(
+    const sep_image * im,
+    sep_psf * psf,
+    const double * x,
+    const double * y,
+    int64_t n,
+    const int * id,
+    short inflag,
+    const double * maxstep,
+    double * xout,
+    double * yout,
+    int * niter,
+    short * flag
+);
+
 
 /*--------------------------- PSF photometry --------------------------------*/
 

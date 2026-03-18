@@ -221,6 +221,17 @@ of 0.5 and a normalizing flux of ``FLUX_AUTO``. The equivalent here is:
     sig = 2. / 2.35 * r  # r from sep.flux_radius() above, with fluxfrac = 0.5
     xwin, ywin, flag = sep.winpos(data, objs['x'], objs['y'], sig)
 
+If you already have a PSF model, ``winpos`` can optionally use the
+evaluated and resampled PSF itself as the weighting function:
+
+.. code-block:: python
+
+    psf = sep.PSF.from_gaussian(fwhm=3.0)
+    xwin, ywin, flag = sep.winpos(data, objs['x'], objs['y'], psf=psf)
+
+This PSF-weighted mode is useful when centroiding should follow the same
+model used for optimal extraction or PSF fitting.
+
 .. _segmentation masking:
 
 Segmentation-masked image measurements

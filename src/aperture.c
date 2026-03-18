@@ -2891,3 +2891,286 @@ int sep_windowed(
 
   return status;
 }
+
+#ifdef _OPENMP
+static void winpos_psf_workspace_nullify(sep_psf *psf) {
+  if (!psf) return;
+  psf->loc = NULL;
+  psf->resi = NULL;
+  psf->interp_mask = NULL;
+  psf->interp_nmask = NULL;
+  psf->interp_start = NULL;
+  psf->interp_buf = NULL;
+  psf->fit_mat = NULL;
+  psf->fit_dvec = NULL;
+  psf->fit_weight = NULL;
+  psf->fit_sol = NULL;
+  psf->fit_vmat = NULL;
+  psf->fit_wmat = NULL;
+  psf->fit_covmat = NULL;
+  psf->svd_rv1 = NULL;
+  psf->svd_tmp = NULL;
+}
+
+static void winpos_psf_workspace_free(sep_psf *psf) {
+  if (!psf) return;
+  free(psf->loc);
+  free(psf->resi);
+  free(psf->interp_mask);
+  free(psf->interp_nmask);
+  free(psf->interp_start);
+  free(psf->interp_buf);
+  winpos_psf_workspace_nullify(psf);
+}
+
+static int winpos_psf_workspace_clone(const sep_psf *src, sep_psf *dst) {
+  int status = RETURN_OK;
+  int npix, rnpix;
+
+  memset(dst, 0, sizeof(*dst));
+  *dst = *src;
+  winpos_psf_workspace_nullify(dst);
+
+  /* Shared read-only model arrays */
+  dst->data = src->data;
+  dst->interp_lut = src->interp_lut;
+
+  npix = src->w * src->h;
+  rnpix = src->rw * src->rh;
+
+  QMALLOC(dst->loc, float, npix, status);
+  QMALLOC(dst->resi, float, rnpix, status);
+  QMALLOC(dst->interp_mask, float, src->interp_mask_len, status);
+  QMALLOC(dst->interp_nmask, int, src->interp_nmask_len, status);
+  QMALLOC(dst->interp_start, int, src->interp_nmask_len, status);
+  QMALLOC(dst->interp_buf, float, src->interp_buf_len, status);
+
+  return RETURN_OK;
+
+exit:
+  winpos_psf_workspace_free(dst);
+  return status;
+}
+#endif
+
+int sep_windowed_psf(
+    const sep_image * im,
+    sep_psf * psf,
+    double x,
+    double y,
+    short inflag,
+    int id,
+    double maxstep,
+    double * xout,
+    double * yout,
+    int * niter,
+    short * flag
+) {
+  PIXTYPE pix;
+  double dx, dy, dxpos, dypos, tmp, twv, tv, step, step_scale, weight;
+  double maskarea, maskweight, maskdxpos, maskdypos, totarea;
+  int64_t imx, imy, pos, size, msize, ssize;
+  int i, sx, sy, status, ismasked;
+  int ix0, iy0;
+  const BYTE *datat, *maskt, *segt;
+  converter convert, mconvert, sconvert;
+
+  if (psf == NULL) {
+    return ILLEGAL_APER_PARAMS;
+  }
+
+  *flag = 0;
+  *xout = x;
+  *yout = y;
+  *niter = 0;
+  status = RETURN_OK;
+  datat = maskt = segt = NULL;
+  size = msize = ssize = 0;
+
+  if ((status = get_converter(im->dtype, &convert, &size))) {
+    return status;
+  }
+  if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize))) {
+    return status;
+  }
+  if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
+    return status;
+  }
+
+  for (i = 0; i < WINPOS_NITERMAX; i++) {
+    status = sep_psf_build(psf, x, y);
+    if (status != RETURN_OK) {
+      return status;
+    }
+
+    ix0 = (int)(x + 0.5);
+    iy0 = (int)(y + 0.5);
+    status = sep_psf_resample(psf, x - ix0, y - iy0);
+    if (status != RETURN_OK) {
+      return status;
+    }
+
+    tv = twv = 0.0;
+    dxpos = dypos = 0.0;
+    maskarea = maskweight = 0.0;
+    maskdxpos = maskdypos = 0.0;
+    totarea = 0.0;
+
+    for (sy = 0; sy < psf->rh; sy++) {
+      imy = iy0 - psf->rh / 2 + sy;
+      if (imy < 0 || imy >= im->h) {
+        *flag |= SEP_APER_TRUNC;
+        continue;
+      }
+
+      for (sx = 0; sx < psf->rw; sx++) {
+        imx = ix0 - psf->rw / 2 + sx;
+        if (imx < 0 || imx >= im->w) {
+          *flag |= SEP_APER_TRUNC;
+          continue;
+        }
+
+        weight = psf->resi[sy * psf->rw + sx];
+        if (weight == 0.0) {
+          continue;
+        }
+
+        pos = imy * im->w + imx;
+        datat = MSVC_VOID_CAST im->data + pos * size;
+        dx = (double)imx - x;
+        dy = (double)imy - y;
+
+        ismasked = 0;
+        if (im->mask) {
+          maskt = MSVC_VOID_CAST im->mask + pos * msize;
+          if (mconvert(maskt) > im->maskthresh) {
+            ismasked = 1;
+          }
+        }
+
+        if (im->segmap) {
+          segt = MSVC_VOID_CAST im->segmap + pos * ssize;
+          if (id > 0) {
+            if ((sconvert(segt) > 0.) && (sconvert(segt) != id)) {
+              ismasked = 1;
+            }
+          } else if (id < 0) {
+            if (sconvert(segt) != -1 * id) {
+              ismasked = 1;
+            }
+          }
+        }
+
+        if (ismasked) {
+          *flag |= SEP_APER_HASMASKED;
+          maskarea += 1.0;
+          maskweight += weight;
+          maskdxpos += weight * dx;
+          maskdypos += weight * dy;
+        } else {
+          pix = convert(datat);
+          tv += pix;
+          twv += pix * weight;
+          dxpos += pix * weight * dx;
+          dypos += pix * weight * dy;
+        }
+
+        totarea += 1.0;
+      }
+    }
+
+    if (im->mask || im->segmap) {
+      if (totarea > 0.0 && maskarea >= totarea) {
+        *flag |= SEP_APER_ALLMASKED;
+        break;
+      }
+      if (inflag & SEP_MASK_IGNORE) {
+        totarea -= maskarea;
+      } else if (totarea > maskarea) {
+        tmp = tv / (totarea - maskarea);
+        twv += tmp * maskweight;
+        dxpos += tmp * maskdxpos;
+        dypos += tmp * maskdypos;
+      }
+    }
+
+    if (twv > 0.0) {
+      dxpos /= twv;
+      dypos /= twv;
+      if (maxstep > 0.0) {
+        step = sqrt(dxpos * dxpos + dypos * dypos);
+        if (step > maxstep) {
+          step_scale = maxstep / step;
+          dxpos *= step_scale;
+          dypos *= step_scale;
+        }
+      }
+      x += dxpos;
+      y += dypos;
+    } else {
+      *flag |= SEP_APER_NONPOSITIVE;
+      break;
+    }
+
+    if (dxpos * dxpos + dypos * dypos < WINPOS_STEPMIN * WINPOS_STEPMIN) {
+      break;
+    }
+  }
+
+  *xout = x;
+  *yout = y;
+  *niter = i + 1;
+
+  return status;
+}
+
+int sep_windowed_psf_array(const sep_image *im, sep_psf *psf, const double *x,
+                           const double *y, int64_t n, const int *id,
+                           short inflag, const double *maxstep, double *xout,
+                           double *yout, int *niter, short *flag) {
+#ifdef _OPENMP
+  int first_status = RETURN_OK;
+
+#pragma omp parallel
+  {
+    sep_psf local_psf;
+    int ws_status = winpos_psf_workspace_clone(psf, &local_psf);
+
+    if (ws_status != RETURN_OK) {
+#pragma omp critical(winpos_psf_status)
+      {
+        if (first_status == RETURN_OK) first_status = ws_status;
+      }
+    } else {
+#pragma omp for schedule(dynamic, 32)
+      for (int64_t i = 0; i < n; i++) {
+        int s = sep_windowed_psf(im, &local_psf, x[i], y[i], inflag,
+                                 id ? id[i] : 0, maxstep ? maxstep[i] : 0.0,
+                                 &xout[i], &yout[i], &niter[i], &flag[i]);
+        if (s != RETURN_OK) {
+#pragma omp critical(winpos_psf_status)
+          {
+            if (first_status == RETURN_OK) first_status = s;
+          }
+        }
+      }
+    }
+
+    winpos_psf_workspace_free(&local_psf);
+  }
+
+  return first_status;
+#else
+  int status = RETURN_OK;
+  int64_t i;
+
+  for (i = 0; i < n; i++) {
+    status = sep_windowed_psf(im, psf, x[i], y[i], inflag, id ? id[i] : 0,
+                              maxstep ? maxstep[i] : 0.0, &xout[i], &yout[i],
+                              &niter[i], &flag[i]);
+    if (status != RETURN_OK) return status;
+  }
+
+  return RETURN_OK;
+#endif
+}

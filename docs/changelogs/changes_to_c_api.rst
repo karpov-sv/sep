@@ -112,3 +112,13 @@ All changes here are transparent to users of the Python interface.
 
  - Added PSF model rendering helper to add a source model at ``(x, y)``
    with specified ``flux`` into a float/double image array.
+
+.. c:function:: int sep_windowed_psf()
+
+ - Added PSF-weighted iterative centroiding using a supplied ``sep_psf``
+   model instead of a Gaussian window.
+
+.. c:function:: int sep_windowed_psf_array()
+
+ - Added batched PSF-weighted centroiding for multiple sources, with
+   threaded execution when OpenMP is enabled.
