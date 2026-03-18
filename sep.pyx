@@ -1339,6 +1339,22 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
             area_arr = np.empty(n, dtype=np.float64)
             flag_arr = np.empty(n, dtype=np.int16)
 
+            # Common grouped optimal-extraction case: constant Gaussian FWHM and
+            # aperture radius. Reuse the optimized grouped Gaussian PSF path.
+            if (n > 1 and group_radius_factor == 1.0
+                    and np.all(fwhm1 == fwhm1[0])
+                    and np.all(r1 == r1[0])):
+                psf = PSF.from_gaussian(float(fwhm1[0]), oversampling=12)
+                sum1, sumerr1, _, _, flag_arr, _, _ = psf_fit(
+                    data, x1, y1, psf,
+                    var=var, err=err, gain=gain, mask=mask,
+                    maskthresh=maskthresh, seg_id=seg_id1, segmap=segmap,
+                    grouped=True, group_factor=group_radius_factor,
+                    fit_positions=False, fit_radius=float(r1[0]))
+                return (sum1.reshape(shape),
+                        sumerr1.reshape(shape),
+                        flag_arr.reshape(shape))
+
             status = sep_sum_circle_optimal_multi(
                 &im,
                 <double*>x1.data,

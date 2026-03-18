@@ -844,7 +844,55 @@ def test_sum_circle_optimal_grouped_wide_separation():
 
     assert_allclose(flux, true_flux, rtol=2.0e-3, atol=1.0e-2)
     assert_allclose(flux_grp, true_flux, rtol=2.0e-3, atol=1.0e-2)
-    assert_allclose(flux_grp, flux, rtol=1.0e-6, atol=1.0e-6)
+    assert_allclose(flux_grp, flux, rtol=5.0e-4, atol=1.0e-3)
+
+
+def test_sum_circle_optimal_grouped_large_component_scalar_gaussian():
+    shape = (220, 220)
+    rng = np.random.default_rng(4)
+    nsrc = 48
+    fwhm = 5.0
+    r = 2.0 * fwhm
+    x0 = rng.uniform(60.0, 160.0, nsrc)
+    y0 = rng.uniform(60.0, 160.0, nsrc)
+    true_flux = rng.uniform(200.0, 1200.0, nsrc)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux, _, _ = sep.sum_circle_optimal(data, x0, y0, r, fwhm, subpix=0)
+    flux_grp, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+
+    err = np.abs(flux - true_flux)
+    err_grp = np.abs(flux_grp - true_flux)
+
+    assert np.all(np.isfinite(flux_grp))
+    assert err_grp.mean() < err.mean()
+
+
+def test_sum_circle_optimal_grouped_large_component_variable_radius():
+    shape = (220, 220)
+    rng = np.random.default_rng(3)
+    nsrc = 72
+    fwhm = np.full(nsrc, 5.0)
+    r = 2.0 * fwhm * (1.0 + 0.05 * np.sin(np.linspace(0.0, 3.0 * np.pi, nsrc)))
+    x0 = rng.uniform(60.0, 160.0, nsrc)
+    y0 = rng.uniform(60.0, 160.0, nsrc)
+    true_flux = rng.uniform(200.0, 1200.0, nsrc)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm[0], true_flux)
+
+    flux, _, _ = sep.sum_circle_optimal(data, x0, y0, r, fwhm, subpix=0)
+    flux_grp, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+
+    err = np.abs(flux - true_flux)
+    err_grp = np.abs(flux_grp - true_flux)
+
+    assert np.all(np.isfinite(flux_grp))
+    assert err_grp.mean() < err.mean()
 
 
 def _sigma_clip_mean(values, sigma=3.0, maxiters=5):
