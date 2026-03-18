@@ -1119,6 +1119,57 @@ def test_set_sub_object_limit():
     sep.set_sub_object_limit(old)
 
 
+def test_extract_watershed_centroids_follow_segment_moments():
+    """
+    Watershed-deblended centroids should match first moments of the assigned
+    segmentation regions rather than staying pinned to seed peak pixels.
+    """
+
+    shape = (25, 25)
+    ygrid, xgrid = np.mgrid[:shape[0], :shape[1]]
+    sigma1 = 1.2
+    sigma2 = 1.35
+    data = (
+        20.0
+        * np.exp(-((xgrid - 8.35) ** 2 + (ygrid - 12.15) ** 2) / (2.0 * sigma1**2))
+        + 14.0
+        * np.exp(-((xgrid - 13.65) ** 2 + (ygrid - 11.8) ** 2) / (2.0 * sigma2**2))
+    ).astype(np.float32)
+
+    objects, segmap = sep.extract(
+        data,
+        0.8,
+        minarea=1,
+        filter_kernel=None,
+        clean=False,
+        segmentation_map=True,
+        deblend_cont=0.0,
+        deblend_method="watershed",
+    )
+
+    assert len(objects) == 2
+
+    order = np.argsort(objects["x"])
+    objects = objects[order]
+
+    for sorted_idx, orig_idx in enumerate(order):
+        obj = objects[sorted_idx]
+        region = segmap == orig_idx + 1
+        assert region.any()
+
+        yy, xx = np.nonzero(region)
+        weights = data[region].astype(np.float64)
+        x_moment = np.sum(xx * weights) / np.sum(weights)
+        y_moment = np.sum(yy * weights) / np.sum(weights)
+
+        assert_allclose(obj["x"], x_moment, atol=1.0e-6)
+        assert_allclose(obj["y"], y_moment, atol=1.0e-6)
+
+        # This regression should fail if deblended centroids fall back to
+        # integer watershed seeds / peak pixels instead of measured moments.
+        assert abs(obj["x"] - obj["xpeak"]) > 0.1
+
+
 def test_long_error_msg():
     """
     Test the error handling in SEP.

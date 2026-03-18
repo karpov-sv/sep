@@ -733,6 +733,7 @@ static int deblend_watershed(
     }
 
     for (i = 0; i < seglist.nobj; i++) {
+      analyse(i, &seglist, 0, 0.0);
       status = addobjdeep(i, &seglist, objlistout);
       if (status != RETURN_OK) {
         goto obj_cleanup;
