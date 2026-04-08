@@ -992,54 +992,56 @@ int sep_sum_circle_optimal(
           overlap = 1.0;
         }
 
-        pix = convert(datat);
-        if (errisarray) {
-          varpix = econvert(errort);
-          if (errisstd) {
-            varpix *= varpix;
-          }
-        }
-
-        ismasked = 0;
-        if (im->mask && (mconvert(maskt) > im->maskthresh)) {
-          ismasked = 1;
-        }
-
-        if (im->segmap) {
-          if (id > 0) {
-            if ((sconvert(segt) > 0.) && (sconvert(segt) != id)) {
-              ismasked = 1;
+        if (overlap > 0.0) {
+          pix = convert(datat);
+          if (errisarray) {
+            varpix = econvert(errort);
+            if (errisstd) {
+              varpix *= varpix;
             }
+          }
+
+          ismasked = 0;
+          if (im->mask && (mconvert(maskt) > im->maskthresh)) {
+            ismasked = 1;
+          }
+
+          if (im->segmap) {
+            if (id > 0) {
+              if ((sconvert(segt) > 0.) && (sconvert(segt) != id)) {
+                ismasked = 1;
+              }
+            } else {
+              if (sconvert(segt) != -1 * id) {
+                ismasked = 1;
+              }
+            }
+          }
+
+          if (ismasked) {
+            *flag |= SEP_APER_HASMASKED;
+            maskarea += overlap;
           } else {
-            if (sconvert(segt) != -1 * id) {
-              ismasked = 1;
-            }
-          }
-        }
-
-        if (ismasked) {
-          *flag |= SEP_APER_HASMASKED;
-          maskarea += overlap;
-        } else {
-          if (varpix > 0.0 && overlap > 0.0) {
-            double scale = overlap;
-            double pix_eff = pix * scale;
-            double var_eff = varpix * scale * scale;
-            psf = gaussian_pixel_integral(dx0, dy0, sigma) * scale;
-            if (var_eff > 0.0) {
-              num += psf * pix_eff / var_eff;
-              den += psf * psf / var_eff;
+            if (varpix > 0.0) {
+              double scale = overlap;
+              double pix_eff = pix * scale;
+              double var_eff = varpix * scale * scale;
+              psf = gaussian_pixel_integral(dx0, dy0, sigma) * scale;
+              if (var_eff > 0.0) {
+                num += psf * pix_eff / var_eff;
+                den += psf * psf / var_eff;
+              } else {
+                *flag |= SEP_APER_HASMASKED;
+                maskarea += overlap;
+              }
             } else {
               *flag |= SEP_APER_HASMASKED;
               maskarea += overlap;
             }
-          } else {
-            *flag |= SEP_APER_HASMASKED;
-            maskarea += overlap;
           }
-        }
 
-        totarea += overlap;
+          totarea += overlap;
+        }
       }
 
       datat += size;

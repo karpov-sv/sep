@@ -847,6 +847,20 @@ def test_sum_circle_optimal_grouped_wide_separation():
     assert_allclose(flux_grp, flux, rtol=5.0e-4, atol=1.0e-3)
 
 
+def test_sum_circle_optimal_clean_image_no_mask_flag():
+    data = np.ones((64, 64), dtype=np.float64)
+    x0 = np.array([20.0, 32.0, 44.0])
+    y0 = np.array([20.0, 32.0, 44.0])
+    r = np.array([3.0, 3.0, 3.0])
+    fwhm = np.array([3.0, 3.0, 3.0])
+
+    flux, fluxerr, flag = sep.sum_circle_optimal(data, x0, y0, r, fwhm)
+
+    assert np.all(np.isfinite(flux))
+    assert np.all(np.isfinite(fluxerr))
+    assert np.all(flag == 0)
+
+
 def test_sum_circle_optimal_grouped_large_component_scalar_gaussian():
     shape = (220, 220)
     rng = np.random.default_rng(4)
