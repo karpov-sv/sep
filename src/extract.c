@@ -44,6 +44,9 @@ _Thread_local int64_t plistsize;
 _Thread_local unsigned int randseed;
 static _Atomic size_t extract_pixstack = 300000;
 
+#define CLEAN_SMALL_A_BASE 4.0f
+#define CLEAN_MAX_BIGOBJ 1024
+
 /* get and set pixstack */
 void sep_set_extract_pixstack(size_t val) {
   extract_pixstack = val;
@@ -93,6 +96,158 @@ int arraybuffer_init(
 );
 void arraybuffer_readline(arraybuffer * buf);
 void arraybuffer_free(arraybuffer * buf);
+
+typedef struct {
+  int64_t cell_id;
+  int64_t obj_index;
+} clean_cell_entry;
+
+static int clean_compare_floats(const void *va, const void *vb) {
+  const float a = *(const float *)va;
+  const float b = *(const float *)vb;
+
+  return (a > b) - (a < b);
+}
+
+static int clean_compare_cells(const void *va, const void *vb) {
+  const clean_cell_entry *a = (const clean_cell_entry *)va;
+  const clean_cell_entry *b = (const clean_cell_entry *)vb;
+
+  if (a->cell_id < b->cell_id) {
+    return -1;
+  }
+  if (a->cell_id > b->cell_id) {
+    return 1;
+  }
+  return (a->obj_index > b->obj_index) - (a->obj_index < b->obj_index);
+}
+
+static int64_t clean_find_cell(const int64_t *cell_ids, int64_t ncell, int64_t target) {
+  int64_t lo = 0, hi = ncell - 1;
+
+  while (lo <= hi) {
+    int64_t mid = lo + (hi - lo) / 2;
+
+    if (cell_ids[mid] == target) {
+      return mid;
+    }
+    if (cell_ids[mid] < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return -1;
+}
+
+static float clean_choose_small_a_max(const objliststruct * objlist) {
+  float *a = NULL;
+  float limit = CLEAN_SMALL_A_BASE;
+  int64_t i;
+  int64_t nobj = objlist->nobj;
+  int64_t nlarge = 0;
+
+  for (i = 0; i < nobj; i++) {
+    if (objlist->obj[i].a > limit) {
+      nlarge++;
+    }
+  }
+  if (nlarge <= CLEAN_MAX_BIGOBJ) {
+    return limit;
+  }
+
+  a = malloc((size_t)nobj * sizeof(float));
+  if (!a) {
+    return limit;
+  }
+
+  for (i = 0; i < nobj; i++) {
+    a[i] = objlist->obj[i].a > 0.0f ? objlist->obj[i].a : 0.0f;
+  }
+  qsort(a, (size_t)nobj, sizeof(float), clean_compare_floats);
+
+  limit = a[nobj - CLEAN_MAX_BIGOBJ - 1];
+  if (limit < CLEAN_SMALL_A_BASE) {
+    limit = CLEAN_SMALL_A_BASE;
+  }
+
+  free(a);
+  return limit;
+}
+
+static void clean_compare_pair(
+    const objstruct *obj1,
+    const objstruct *obj2,
+    int64_t i,
+    int64_t j,
+    double beta,
+    double ampin,
+    double alphain,
+    int *survives
+) {
+  double amp, alpha, unitarea, val;
+  float dx, dy, rlim;
+
+  dx = obj1->mx - obj2->mx;
+  dy = obj1->my - obj2->my;
+  rlim = obj1->a + obj2->a;
+  rlim *= rlim;
+  if (dx * dx + dy * dy > rlim * CLEAN_ZONE * CLEAN_ZONE) {
+    return;
+  }
+
+  if (obj2->fdflux < obj1->fdflux) {
+    val = 1 + alphain * (obj1->cxx * dx * dx + obj1->cyy * dy * dy + obj1->cxy * dx * dy);
+    if (val > 1.0
+        && ((float)(val < 1e10 ? ampin * pow(val, -beta) : 0.0) > obj2->mthresh))
+    {
+      survives[j] = 0;
+    }
+  } else {
+    unitarea = PI * obj2->a * obj2->b;
+    amp = obj2->fdflux / (2 * unitarea * obj2->abcor);
+    alpha = (pow(amp / obj2->thresh, 1.0 / beta) - 1) * unitarea / obj2->fdnpix;
+    val = 1 + alpha * (obj2->cxx * dx * dx + obj2->cyy * dy * dy + obj2->cxy * dx * dy);
+    if (val > 1.0
+        && ((float)(val < 1e10 ? amp * pow(val, -beta) : 0.0) > obj1->mthresh))
+    {
+      survives[i] = 0;
+    }
+  }
+}
+
+static void clean_naive(objliststruct * objlist, double clean_param, int * survives) {
+  const objstruct *obj1, *obj2;
+  int64_t i, j;
+  double ampin, alphain, unitareain, beta;
+
+  beta = clean_param;
+
+  for (i = 0; i < objlist->nobj; i++) {
+    survives[i] = 1;
+  }
+
+  obj1 = objlist->obj;
+  for (i = 0; i < objlist->nobj; i++, obj1++) {
+    if (!survives[i]) {
+      continue;
+    }
+
+    unitareain = PI * obj1->a * obj1->b;
+    ampin = obj1->fdflux / (2 * unitareain * obj1->abcor);
+    alphain = (pow(ampin / obj1->thresh, 1.0 / beta) - 1) * unitareain / obj1->fdnpix;
+
+    obj2 = obj1 + 1;
+    for (j = i + 1; j < objlist->nobj; j++, obj2++) {
+      if (!survives[j]) {
+        continue;
+      }
+
+      clean_compare_pair(obj1, obj2, i, j, beta, ampin, alphain, survives);
+    }
+  }
+}
 
 /********************* array buffer functions ********************************/
 
@@ -1107,74 +1262,178 @@ Fill a list with whether each object in the list survived the cleaning
 */
 
 void clean(objliststruct * objlist, double clean_param, int * survives) {
-  objstruct *obj1, *obj2;
-  int64_t i, j;
-  double amp, ampin, alpha, alphain, unitarea, unitareain, beta, val;
-  float dx, dy, rlim;
+  const objstruct *obj1;
+  clean_cell_entry *small_entries = NULL;
+  int64_t *large_indices = NULL;
+  int64_t *cell_ids = NULL, *cell_starts = NULL, *cell_counts = NULL;
+  int64_t nsmall = 0, nlarge = 0, ncells = 0;
+  int64_t i, j, k, cell_idx, grid_w = 0, grid_h = 0;
+  double ampin, alphain, beta, cell_size, reach, minx = 0.0, miny = 0.0, maxx = 0.0,
+                                          maxy = 0.0, unitareain;
+  float small_a_max;
 
   beta = clean_param;
+  small_a_max = clean_choose_small_a_max(objlist);
+  cell_size = CLEAN_ZONE * (double)small_a_max;
 
-  /* initialize to all surviving */
+  if (!(small_a_max > 0.0f) || !(cell_size > 0.0)) {
+    clean_naive(objlist, clean_param, survives);
+    return;
+  }
+
   for (i = 0; i < objlist->nobj; i++) {
+    if (objlist->obj[i].a > small_a_max) {
+      nlarge++;
+    } else {
+      if (!nsmall) {
+        minx = maxx = objlist->obj[i].mx;
+        miny = maxy = objlist->obj[i].my;
+      } else {
+        if (objlist->obj[i].mx < minx) {
+          minx = objlist->obj[i].mx;
+        } else if (objlist->obj[i].mx > maxx) {
+          maxx = objlist->obj[i].mx;
+        }
+
+        if (objlist->obj[i].my < miny) {
+          miny = objlist->obj[i].my;
+        } else if (objlist->obj[i].my > maxy) {
+          maxy = objlist->obj[i].my;
+        }
+      }
+      nsmall++;
+    }
+  }
+
+  if (nlarge) {
+    large_indices = malloc((size_t)nlarge * sizeof(int64_t));
+    if (!large_indices) {
+      goto fallback;
+    }
+  }
+
+  if (nsmall) {
+    small_entries = malloc((size_t)nsmall * sizeof(clean_cell_entry));
+    cell_ids = malloc((size_t)nsmall * sizeof(int64_t));
+    cell_starts = malloc((size_t)nsmall * sizeof(int64_t));
+    cell_counts = malloc((size_t)nsmall * sizeof(int64_t));
+    if (!small_entries || !cell_ids || !cell_starts || !cell_counts) {
+      goto fallback;
+    }
+
+    grid_w = (int64_t)((maxx - minx) / cell_size) + 1;
+    grid_h = (int64_t)((maxy - miny) / cell_size) + 1;
+    if (grid_w <= 0 || grid_h <= 0) {
+      goto fallback;
+    }
+  }
+
+  nsmall = nlarge = 0;
+  for (i = 0; i < objlist->nobj; i++) {
+    const objstruct *obj = objlist->obj + i;
+
+    if (obj->a > small_a_max) {
+      large_indices[nlarge++] = i;
+    } else {
+      int64_t cx = (int64_t)((obj->mx - minx) / cell_size);
+      int64_t cy = (int64_t)((obj->my - miny) / cell_size);
+
+      small_entries[nsmall].cell_id = cy * grid_w + cx;
+      small_entries[nsmall].obj_index = i;
+      nsmall++;
+    }
+
     survives[i] = 1;
+  }
+
+  if (nsmall) {
+    qsort(small_entries, (size_t)nsmall, sizeof(clean_cell_entry), clean_compare_cells);
+
+    ncells = 0;
+    for (i = 0; i < nsmall; i++) {
+      if (!i || small_entries[i].cell_id != small_entries[i - 1].cell_id) {
+        cell_ids[ncells] = small_entries[i].cell_id;
+        cell_starts[ncells] = i;
+        cell_counts[ncells] = 1;
+        ncells++;
+      } else {
+        cell_counts[ncells - 1]++;
+      }
+    }
   }
 
   obj1 = objlist->obj;
   for (i = 0; i < objlist->nobj; i++, obj1++) {
+    int64_t cx, cy, cdx, x0, x1, y0, y1;
+
     if (!survives[i]) {
       continue;
     }
 
-    /* parameters for test object */
     unitareain = PI * obj1->a * obj1->b;
     ampin = obj1->fdflux / (2 * unitareain * obj1->abcor);
     alphain = (pow(ampin / obj1->thresh, 1.0 / beta) - 1) * unitareain / obj1->fdnpix;
 
-    /* loop over remaining objects in list*/
-    obj2 = obj1 + 1;
-    for (j = i + 1; j < objlist->nobj; j++, obj2++) {
-      if (!survives[j]) {
+    for (k = 0; k < nlarge; k++) {
+      j = large_indices[k];
+      if (j <= i || !survives[j]) {
         continue;
       }
 
-      dx = obj1->mx - obj2->mx;
-      dy = obj1->my - obj2->my;
-      rlim = obj1->a + obj2->a;
-      rlim *= rlim;
-      if (dx * dx + dy * dy > rlim * CLEAN_ZONE * CLEAN_ZONE) {
-        continue;
-      }
+      clean_compare_pair(obj1, objlist->obj + j, i, j, beta, ampin, alphain, survives);
+    }
 
-      /* if obj1 is bigger, see if it eats obj2 */
-      if (obj2->fdflux < obj1->fdflux) {
-        val = 1
-              + alphain
-                    * (obj1->cxx * dx * dx + obj1->cyy * dy * dy + obj1->cxy * dx * dy);
-        if (val > 1.0
-            && ((float)(val < 1e10 ? ampin * pow(val, -beta) : 0.0) > obj2->mthresh))
-        {
-          survives[j] = 0; /* the test object eats this one */
+    if (!nsmall) {
+      continue;
+    }
+
+    reach = CLEAN_ZONE * (obj1->a + small_a_max);
+    cdx = (int64_t)ceil(reach / cell_size);
+    cx = (int64_t)((obj1->mx - minx) / cell_size);
+    cy = (int64_t)((obj1->my - miny) / cell_size);
+
+    x0 = cx > cdx ? cx - cdx : 0;
+    x1 = cx + cdx < grid_w - 1 ? cx + cdx : grid_w - 1;
+    y0 = cy > cdx ? cy - cdx : 0;
+    y1 = cy + cdx < grid_h - 1 ? cy + cdx : grid_h - 1;
+
+    for (cy = y0; cy <= y1; cy++) {
+      for (cx = x0; cx <= x1; cx++) {
+        int64_t start, end;
+
+        cell_idx = clean_find_cell(cell_ids, ncells, cy * grid_w + cx);
+        if (cell_idx < 0) {
+          continue;
+        }
+
+        start = cell_starts[cell_idx];
+        end = start + cell_counts[cell_idx];
+        for (k = start; k < end; k++) {
+          j = small_entries[k].obj_index;
+          if (j <= i || !survives[j]) {
+            continue;
+          }
+
+          clean_compare_pair(obj1, objlist->obj + j, i, j, beta, ampin, alphain, survives);
         }
       }
+    }
+  }
 
-      /* if obj2 is bigger, see if it eats obj1 */
-      else
-      {
-        unitarea = PI * obj2->a * obj2->b;
-        amp = obj2->fdflux / (2 * unitarea * obj2->abcor);
-        alpha = (pow(amp / obj2->thresh, 1.0 / beta) - 1) * unitarea / obj2->fdnpix;
-        val =
-            1
-            + alpha * (obj2->cxx * dx * dx + obj2->cyy * dy * dy + obj2->cxy * dx * dy);
-        if (val > 1.0
-            && ((float)(val < 1e10 ? amp * pow(val, -beta) : 0.0) > obj1->mthresh))
-        {
-          survives[i] = 0; /* this object eats the test object */
-        }
-      }
+  free(cell_counts);
+  free(cell_starts);
+  free(cell_ids);
+  free(large_indices);
+  free(small_entries);
+  return;
 
-    } /* inner loop over objlist (obj2) */
-  } /* outer loop of objlist (obj1) */
+fallback:
+  free(cell_counts);
+  free(cell_starts);
+  free(cell_ids);
+  free(large_indices);
+  free(small_entries);
+  clean_naive(objlist, clean_param, survives);
 }
 
 /************************** get_mean_thresh **********************************/
