@@ -508,6 +508,27 @@ def test_extract_with_noise_convolution():
     assert_approx_equal(objects[1]["y"], 3.0)
 
 
+@pytest.mark.parametrize("fwhm", [1.0, 1.2, 1.4, 1.6])
+def test_extract_fwhm_compact_gaussian(fwhm):
+    flux = np.array([5000.0])
+    image = _gaussian_scene((25, 25), np.array([12.3]), np.array([12.7]), fwhm, flux)
+
+    objects = sep.extract(image, 5.0)
+
+    assert len(objects) == 1
+    assert abs(objects["fwhm"][0] - fwhm) / fwhm < 0.1
+
+
+def test_extract_fwhm_hotpixel_zero():
+    image = np.zeros((11, 11))
+    image[5, 5] = 1000.0
+
+    objects = sep.extract(image, 5.0, minarea=1)
+
+    assert len(objects) == 1
+    assert objects["fwhm"][0] == 0.0
+
+
 def test_extract_matched_filter_at_edge():
     """
     Test bright source detection at the edge of an image.

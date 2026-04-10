@@ -30,6 +30,60 @@
 #include "sep.h"
 #include "sepcore.h"
 
+static int fit_fwhm_core(
+    const objstruct * obj,
+    pliststruct * pixel,
+    double mx_fwhm,
+    double my_fwhm,
+    PIXTYPE thresh0,
+    float * fwhm_out
+) {
+  pliststruct * pixt;
+  double s, sx, sxx, sy, sxy;
+  double dx, dy, d2, lpix, pix, b, d, bmax, w, raw_fwhm, dscale;
+
+  s = sx = sxx = sy = sxy = 0.0;
+
+  for (pixt = pixel + obj->firstpix; pixt >= pixel; pixt = pixel + PLIST(pixt, nextpix)) {
+    pix = (double)PLISTPIX(pixt, value);
+    if (pix > thresh0) {
+      dx = (double)PLIST(pixt, x) - mx_fwhm;
+      dy = (double)PLIST(pixt, y) - my_fwhm;
+      lpix = log(pix);
+      d2 = dx * dx + dy * dy;
+      w = pix * pix;
+      s += w;
+      sx += d2 * w;
+      sxx += d2 * d2 * w;
+      sy += lpix * w;
+      sxy += lpix * d2 * w;
+    }
+  }
+
+  d = s * sxx - sx * sx;
+  dscale = fabs(s * sxx) + fabs(sx * sx);
+  if (!(dscale > 0.0) || fabs(d) <= 1e-12 * dscale) {
+    return 0;
+  }
+
+  b = -(s * sxy - sx * sy) / d;
+  bmax = 1.0 / (13.0 * obj->a * obj->b);
+  if (!isfinite(b)) {
+    return 0;
+  }
+  if (b < bmax) {
+    b = bmax;
+  }
+
+  raw_fwhm = 1.6651 / sqrt(b);
+  if (!isfinite(raw_fwhm) || raw_fwhm <= 0.5) {
+    return 0;
+  }
+
+  *fwhm_out = (float)(raw_fwhm - 1.0 / (4.0 * raw_fwhm));
+  return 1;
+}
+
 /********************************** cleanprep ********************************/
 /*
  * Prepare object for cleaning, by calculating mthresh.
@@ -315,13 +369,18 @@ void analyse(int no, objliststruct * objlist, int robust, double gain) {
   }
 
   /* Compute Gaussian-core FWHM (ported from SExtractor).
-   * Assumes background-subtracted data (SEP does not store per-object bkg). */
+   * Assumes background-subtracted data (SEP does not store per-object bkg).
+   *
+   * For compact sources the highest-core threshold can include too few
+   * pixels to constrain the log-profile slope. Retry at lower internal
+   * thresholds before giving up, but keep unresolved pathologies at 0
+   * instead of switching to a biased moment-based width. */
   {
     PIXTYPE thresh0;
-    double s, sx, sxx, sy, sxy;
-    double dx, dy, d2, lpix, pix, b, d, bmax, w;
+    PIXTYPE tries[4];
     double mx_fwhm = obj->mx;
     double my_fwhm = obj->my;
+    int i, ntry;
 
     thresh0 = obj->dpeak / 5.0;
     if (thresh0 < obj->thresh) {
@@ -329,38 +388,24 @@ void analyse(int no, objliststruct * objlist, int robust, double gain) {
     }
 
     if (thresh0 > 0.0 && obj->a > 0.0f && obj->b > 0.0f) {
-      s = sx = sxx = sy = sxy = 0.0;
-      for (pixt = pixel + obj->firstpix; pixt >= pixel;
-           pixt = pixel + PLIST(pixt, nextpix))
-      {
-        pix = (double)PLISTPIX(pixt, value);
-        if (pix > thresh0) {
-          dx = (double)PLIST(pixt, x) - mx_fwhm;
-          dy = (double)PLIST(pixt, y) - my_fwhm;
-          lpix = log(pix);
-          d2 = dx * dx + dy * dy;
-          w = pix * pix;
-          s += w;
-          sx += d2 * w;
-          sxx += d2 * d2 * w;
-          sy += lpix * w;
-          sxy += lpix * d2 * w;
-        }
+      ntry = 0;
+      tries[ntry++] = thresh0;
+
+      if (obj->dpeak / 10.0 > obj->thresh && obj->dpeak / 10.0 < tries[ntry - 1]) {
+        tries[ntry++] = obj->dpeak / 10.0;
+      }
+      if (obj->dpeak / 20.0 > obj->thresh && obj->dpeak / 20.0 < tries[ntry - 1]) {
+        tries[ntry++] = obj->dpeak / 20.0;
+      }
+      if (obj->thresh > 0.0 && obj->thresh < tries[ntry - 1]) {
+        tries[ntry++] = obj->thresh;
       }
 
-      d = s * sxx - sx * sx;
-      if (fabs(d) > 0.0) {
-        b = -(s * sxy - sx * sy) / d;
-        bmax = 1.0 / (13.0 * obj->a * obj->b);
-        if (b < bmax) {
-          b = bmax;
+      obj->fwhm = 0.0f;
+      for (i = 0; i < ntry; i++) {
+        if (fit_fwhm_core(obj, pixel, mx_fwhm, my_fwhm, tries[i], &obj->fwhm)) {
+          break;
         }
-        obj->fwhm = (float)(1.6651 / sqrt(b));
-        if (obj->fwhm > 0.0f) {
-          obj->fwhm -= (float)(1.0 / (4.0 * obj->fwhm));
-        }
-      } else {
-        obj->fwhm = 0.0f;
       }
     } else {
       obj->fwhm = 0.0f;
