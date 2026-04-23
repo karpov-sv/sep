@@ -317,6 +317,25 @@ typedef struct {
   int count;
 } opt_group_order_entry;
 
+typedef struct {
+  size_t pix_cap;
+  size_t src_cap;
+  size_t nnz_cap;
+  size_t id_cap;
+  double *gdata;
+  double *gweight;
+  double *col_vals;
+  double *M;
+  double *b;
+  double *sol;
+  double *work;
+  int *pix_idx;
+  int *col_starts;
+  int *group_ids;
+  int *pos_ids;
+  int *neg_ids;
+} opt_group_workspace;
+
 static int opt_xorder_cmp(const void *a, const void *b) {
   const opt_xorder_entry *pa = (const opt_xorder_entry *)a;
   const opt_xorder_entry *pb = (const opt_xorder_entry *)b;
@@ -353,6 +372,89 @@ static int opt_int_contains(const int *arr, int n, int value) {
     }
   }
   return 0;
+}
+
+static int opt_realloc_bytes(void **ptr, size_t nbytes) {
+  void *tmp;
+
+  if (nbytes == 0) return RETURN_OK;
+  tmp = realloc(*ptr, nbytes);
+  if (!tmp) return MEMORY_ALLOC_ERROR;
+  *ptr = tmp;
+  return RETURN_OK;
+}
+
+static int optimal_group_workspace_ensure(opt_group_workspace *ws, size_t gnpix,
+                                          int gcount, size_t nnz_cap,
+                                          int id_cap) {
+  int status;
+
+  if (gnpix > ws->pix_cap) {
+    if ((status = opt_realloc_bytes((void **)&ws->gdata,
+                                    gnpix * sizeof(double))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->gweight,
+                                    gnpix * sizeof(double))))
+      return status;
+    ws->pix_cap = gnpix;
+  }
+  if ((size_t)gcount > ws->src_cap) {
+    if ((status = opt_realloc_bytes((void **)&ws->M,
+                                    (size_t)gcount * (size_t)gcount *
+                                        sizeof(double))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->b,
+                                    (size_t)gcount * sizeof(double))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->sol,
+                                    (size_t)gcount * sizeof(double))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->work,
+                                    (size_t)gcount * sizeof(double))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->col_starts,
+                                    (size_t)(gcount + 1) * sizeof(int))))
+      return status;
+    ws->src_cap = (size_t)gcount;
+  }
+  if (nnz_cap > ws->nnz_cap) {
+    if ((status = opt_realloc_bytes((void **)&ws->pix_idx,
+                                    nnz_cap * sizeof(int))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->col_vals,
+                                    nnz_cap * sizeof(double))))
+      return status;
+    ws->nnz_cap = nnz_cap;
+  }
+  if ((size_t)id_cap > ws->id_cap) {
+    if ((status = opt_realloc_bytes((void **)&ws->group_ids,
+                                    (size_t)id_cap * sizeof(int))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->pos_ids,
+                                    (size_t)id_cap * sizeof(int))))
+      return status;
+    if ((status = opt_realloc_bytes((void **)&ws->neg_ids,
+                                    (size_t)id_cap * sizeof(int))))
+      return status;
+    ws->id_cap = (size_t)id_cap;
+  }
+
+  return RETURN_OK;
+}
+
+static void optimal_group_workspace_free(opt_group_workspace *ws) {
+  free(ws->gdata);
+  free(ws->gweight);
+  free(ws->col_vals);
+  free(ws->M);
+  free(ws->b);
+  free(ws->sol);
+  free(ws->work);
+  free(ws->pix_idx);
+  free(ws->col_starts);
+  free(ws->group_ids);
+  free(ws->pos_ids);
+  free(ws->neg_ids);
 }
 
 static void optimal_source_bbox(double x, double y, double r, int64_t *xmin,
@@ -427,6 +529,61 @@ static int optimal_group_upper_bound(const double *x, const int *gidx, int n,
   return lo;
 }
 
+static int optimal_group_split_active(const double *x, const double *y,
+                                      const double *r, int active_count,
+                                      const int *active_idx, int *parent,
+                                      int *rank, int *group_id,
+                                      int *group_counts, int *group_offsets,
+                                      int *group_fill, int *members) {
+  double max_r = 0.0;
+  int i, j, ngroups;
+
+  for (i = 0; i < active_count; i++) {
+    int idx = active_idx[i];
+    parent[i] = i;
+    rank[i] = 0;
+    group_counts[i] = 0;
+    group_fill[i] = -1;
+    if (r[idx] > max_r) max_r = r[idx];
+  }
+
+  for (i = 0; i < active_count; i++) {
+    int ii = active_idx[i];
+    double xi = x[ii];
+    double link_limit = r[ii] + max_r;
+    for (j = i + 1; j < active_count; j++) {
+      int jj = active_idx[j];
+      double dx = x[jj] - xi;
+      double dy, rsum;
+      if (dx > link_limit) break;
+      rsum = r[ii] + r[jj];
+      dy = y[ii] - y[jj];
+      if (dy > rsum || dy < -rsum) continue;
+      if (dx * dx + dy * dy <= rsum * rsum) uf_union(parent, rank, i, j);
+    }
+  }
+
+  ngroups = 0;
+  for (i = 0; i < active_count; i++) {
+    int root = uf_find(parent, i);
+    if (group_fill[root] < 0) group_fill[root] = ngroups++;
+    group_id[i] = group_fill[root];
+    group_counts[group_id[i]] += 1;
+  }
+
+  group_offsets[0] = 0;
+  for (i = 0; i < ngroups; i++) {
+    group_offsets[i + 1] = group_offsets[i] + group_counts[i];
+    group_fill[i] = group_offsets[i];
+  }
+  for (i = 0; i < active_count; i++) {
+    int gid = group_id[i];
+    members[group_fill[gid]++] = active_idx[i];
+  }
+
+  return ngroups;
+}
+
 static void optimal_mark_tiles_for_bbox(unsigned char *dirty, int nx, int ny,
                                         int64_t xbase, int64_t ybase,
                                         int64_t core_span, int64_t xmin,
@@ -450,6 +607,305 @@ static void optimal_mark_tiles_for_bbox(unsigned char *dirty, int nx, int ny,
       dirty[ty * nx + tx] = 1;
     }
   }
+}
+
+static double optimal_sparse_dot(const int *pix_idx, const double *col_vals,
+                                 int ia, int ib, int ja, int jb) {
+  double acc = 0.0;
+
+  while (ia < ib && ja < jb) {
+    int ip = pix_idx[ia];
+    int jp = pix_idx[ja];
+    if (ip < jp) {
+      ia++;
+    } else if (jp < ip) {
+      ja++;
+    } else {
+      acc += col_vals[ia] * col_vals[ja];
+      ia++;
+      ja++;
+    }
+  }
+
+  return acc;
+}
+
+static int optimal_group_solve_compact(
+    const sep_image *im, const double *x, const double *y, const double *r,
+    const double *r2, const double *r_in2, const double *r_out2,
+    const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
+    const int64_t *symin_arr, const int64_t *symax_arr,
+    const unsigned char *trunc_arr, const int *id, int subpix, short inflag,
+    int gcount, const int *gidx, const int *fixed_idx, int fixed_count,
+    const double *fixed_flux, opt_group_workspace *ws, double *sum,
+    double *sumerr, short *flag) {
+  PIXTYPE pix, varpix;
+  double dx, dy, overlap, scale, scale2, offset, var;
+  int64_t gxmin, gxmax, gymin, gymax;
+  int64_t ix, iy;
+  size_t nnz_cap = 0;
+  size_t gnpix;
+  int gw, gh;
+  int i, j, k, status, ismasked, has_pos = 0, has_neg = 0;
+  int errisarray, errisstd, n_pos = 0, n_neg = 0, nsolve_ids = 0;
+  int *group_ids = NULL, *pos_ids = NULL, *neg_ids = NULL;
+  double *gdata = NULL, *gweight = NULL, *col_vals = NULL;
+  double *M = NULL, *b = NULL, *sol = NULL, *work = NULL;
+  int *pix_idx = NULL, *col_starts = NULL;
+  converter convert, econvert = NULL, mconvert, sconvert;
+  int64_t size, esize, msize, ssize;
+
+  if (gcount <= 0) return RETURN_OK;
+
+  gxmin = im->w;
+  gxmax = 0;
+  gymin = im->h;
+  gymax = 0;
+  for (i = 0; i < gcount; i++) {
+    int idx = gidx[i];
+    int64_t lxmin = sxmin_arr[idx];
+    int64_t lxmax = sxmax_arr[idx];
+    int64_t lymin = symin_arr[idx];
+    int64_t lymax = symax_arr[idx];
+    if (trunc_arr && trunc_arr[idx]) flag[idx] |= SEP_APER_TRUNC;
+    if (lxmin < 0) lxmin = 0;
+    if (lymin < 0) lymin = 0;
+    if (lxmax > im->w) lxmax = im->w;
+    if (lymax > im->h) lymax = im->h;
+    if (lxmin < gxmin) gxmin = lxmin;
+    if (lxmax > gxmax) gxmax = lxmax;
+    if (lymin < gymin) gymin = lymin;
+    if (lymax > gymax) gymax = lymax;
+    nnz_cap += (size_t)(lxmax - lxmin) * (size_t)(lymax - lymin);
+  }
+
+  if (gxmin >= gxmax || gymin >= gymax) return RETURN_OK;
+
+  gw = (int)(gxmax - gxmin);
+  gh = (int)(gymax - gymin);
+  gnpix = (size_t)gw * (size_t)gh;
+
+  status = optimal_group_workspace_ensure(
+      ws, gnpix, gcount, nnz_cap ? nnz_cap : 1,
+      (im->segmap && id) ? (gcount + fixed_count) : 0);
+  if (status != RETURN_OK) return status;
+
+  gdata = ws->gdata;
+  gweight = ws->gweight;
+  col_vals = ws->col_vals;
+  M = ws->M;
+  b = ws->b;
+  sol = ws->sol;
+  work = ws->work;
+  pix_idx = ws->pix_idx;
+  col_starts = ws->col_starts;
+  group_ids = ws->group_ids;
+  pos_ids = ws->pos_ids;
+  neg_ids = ws->neg_ids;
+
+  if ((status = get_converter(im->dtype, &convert, &size))) return status;
+  if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize))) {
+    return status;
+  }
+  if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
+    return status;
+  }
+  errisarray = 0;
+  errisstd = 0;
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize))) return status;
+    }
+  }
+
+  if (im->segmap && id) {
+    for (i = 0; i < gcount; i++) group_ids[nsolve_ids++] = id[gidx[i]];
+    for (i = 0; i < fixed_count; i++) group_ids[nsolve_ids++] = id[fixed_idx[i]];
+    qsort(group_ids, (size_t)nsolve_ids, sizeof(int), opt_int_cmp);
+    for (i = 0; i < nsolve_ids; i++) {
+      int gid = group_ids[i];
+      if (gid > 0) {
+        has_pos = 1;
+        pos_ids[n_pos++] = gid;
+      } else if (gid < 0) {
+        has_neg = 1;
+        neg_ids[n_neg++] = -gid;
+      }
+    }
+  }
+
+  if (subpix > 0) {
+    scale = 1.0 / subpix;
+    scale2 = scale * scale;
+    offset = 0.5 * (scale - 1.0);
+  } else {
+    scale = 0.0;
+    scale2 = 0.0;
+    offset = 0.0;
+  }
+
+  memset(gweight, 0, gnpix * sizeof(double));
+
+  for (iy = gymin; iy < gymax; iy++) {
+    for (ix = gxmin; ix < gxmax; ix++) {
+      int pidx = (int)((iy - gymin) * gw + (ix - gxmin));
+      int64_t pos = iy * im->w + ix;
+
+      ismasked = 0;
+      if (im->mask &&
+          (mconvert(MSVC_VOID_CAST im->mask + pos * msize) > im->maskthresh)) {
+        ismasked = 1;
+      }
+
+      if (im->segmap) {
+        int seg_masked = 0;
+        double segval = sconvert(MSVC_VOID_CAST im->segmap + pos * ssize);
+        if (has_pos) {
+          if (segval > 0.0 && !opt_int_contains(pos_ids, n_pos, (int)segval)) {
+            seg_masked = 1;
+          }
+        } else if (has_neg) {
+          if (!opt_int_contains(neg_ids, n_neg, (int)segval)) seg_masked = 1;
+        }
+        if (seg_masked) ismasked = 1;
+      }
+
+      pix = convert(MSVC_VOID_CAST im->data + pos * size);
+      if (errisarray) {
+        varpix = econvert(MSVC_VOID_CAST im->noise + pos * esize);
+        if (errisstd) varpix *= varpix;
+      } else if (im->noise_type != SEP_NOISE_NONE) {
+        varpix = errisstd ? im->noiseval * im->noiseval : im->noiseval;
+      } else {
+        varpix = 1.0;
+      }
+
+      if (varpix <= 0.0) ismasked = 1;
+      if (ismasked) continue;
+
+      gweight[pidx] = 1.0 / sqrt(varpix);
+      gdata[pidx] = pix * gweight[pidx];
+    }
+  }
+
+  if (fixed_idx && fixed_flux) {
+    for (i = 0; i < fixed_count; i++) {
+      int idx = fixed_idx[i];
+      int64_t lxmin = sxmin_arr[idx];
+      int64_t lxmax = sxmax_arr[idx];
+      int64_t lymin = symin_arr[idx];
+      int64_t lymax = symax_arr[idx];
+
+      if (fixed_flux[idx] == 0.0) continue;
+      if (lxmin < gxmin) lxmin = gxmin;
+      if (lymin < gymin) lymin = gymin;
+      if (lxmax > gxmax) lxmax = gxmax;
+      if (lymax > gymax) lymax = gymax;
+      if (lxmin >= lxmax || lymin >= lymax) continue;
+
+      for (iy = lymin; iy < lymax; iy++) {
+        int row0 = (int)((iy - gymin) * gw - gxmin);
+        for (ix = lxmin; ix < lxmax; ix++) {
+          int pidx = row0 + (int)ix;
+          if (!(gweight[pidx] > 0.0)) continue;
+          dx = ix - x[idx];
+          dy = iy - y[idx];
+          overlap = optimal_circle_overlap(
+              dx, dy, r[idx], r2[idx], r_in2[idx], r_out2[idx], subpix, scale,
+              scale2, offset);
+          if (overlap <= 0.0) continue;
+          gdata[pidx] -= fixed_flux[idx] *
+                         gaussian_pixel_integral(dx, dy, sigma_arr[idx]) *
+                         gweight[pidx];
+        }
+      }
+    }
+  }
+
+  k = 0;
+  for (i = 0; i < gcount; i++) {
+    int idx = gidx[i];
+    int64_t lxmin = sxmin_arr[idx];
+    int64_t lxmax = sxmax_arr[idx];
+    int64_t lymin = symin_arr[idx];
+    int64_t lymax = symax_arr[idx];
+
+    col_starts[i] = k;
+    if (lxmin < gxmin) lxmin = gxmin;
+    if (lymin < gymin) lymin = gymin;
+    if (lxmax > gxmax) lxmax = gxmax;
+    if (lymax > gymax) lymax = gymax;
+
+    for (iy = lymin; iy < lymax; iy++) {
+      int row0 = (int)((iy - gymin) * gw - gxmin);
+      for (ix = lxmin; ix < lxmax; ix++) {
+        int pidx = row0 + (int)ix;
+        if (!(gweight[pidx] > 0.0)) continue;
+        dx = ix - x[idx];
+        dy = iy - y[idx];
+        overlap = optimal_circle_overlap(
+            dx, dy, r[idx], r2[idx], r_in2[idx], r_out2[idx], subpix, scale,
+            scale2, offset);
+        if (overlap <= 0.0) continue;
+        pix_idx[k] = pidx;
+        col_vals[k] = gaussian_pixel_integral(dx, dy, sigma_arr[idx]) *
+                      gweight[pidx];
+        k++;
+      }
+    }
+  }
+  col_starts[gcount] = k;
+
+  memset(M, 0, (size_t)gcount * (size_t)gcount * sizeof(double));
+  memset(b, 0, (size_t)gcount * sizeof(double));
+  for (i = 0; i < gcount; i++) {
+    int ia = col_starts[i];
+    int ib = col_starts[i + 1];
+    for (j = ia; j < ib; j++) b[i] += col_vals[j] * gdata[pix_idx[j]];
+    M[i * gcount + i] = optimal_sparse_dot(pix_idx, col_vals, ia, ib, ia, ib);
+    for (j = 0; j < i; j++) {
+      double dot = optimal_sparse_dot(pix_idx, col_vals, ia, ib, col_starts[j],
+                                      col_starts[j + 1]);
+      M[i * gcount + j] = dot;
+      M[j * gcount + i] = dot;
+    }
+  }
+
+  var = 0.0;
+  for (i = 0; i < gcount; i++) var += M[i * gcount + i];
+  if (!(var > 0.0) || cholesky_decomp(M, gcount)) {
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      double area_tmp;
+      status = sep_sum_circle_optimal(
+          im, x[idx], y[idx], r[idx], sigma_arr[idx] * 2.354820045,
+          id ? id[idx] : 0, subpix, inflag, &sum[idx], &sumerr[idx], &area_tmp,
+          &flag[idx]);
+      if (status != RETURN_OK) return status;
+    }
+    return RETURN_OK;
+  }
+
+  cholesky_solve(M, b, sol, gcount, work);
+  for (i = 0; i < gcount; i++) {
+    int idx = gidx[i];
+    sum[idx] = sol[i];
+  }
+
+  for (i = 0; i < gcount; i++) {
+    int idx = gidx[i];
+    memset(work, 0, (size_t)gcount * sizeof(double));
+    work[i] = 1.0;
+    cholesky_solve(M, work, sol, gcount, b);
+    var = sol[i];
+    if (var < 0.0) var = 0.0;
+    if (im->gain > 0.0 && sum[idx] > 0.0) var += sum[idx] / im->gain;
+    sumerr[idx] = sqrt(var);
+  }
+
+  return RETURN_OK;
 }
 
 static int optimal_group_solve_exact(
@@ -753,11 +1209,15 @@ static int optimal_group_solve_localized(
   int64_t group_xmin, group_xmax, group_ymin, group_ymax, core_span, core_shift;
   double *work_flux = NULL, *tmp_flux = NULL, *tmp_fluxerr = NULL;
   int *core_idx = NULL, *active_idx = NULL, *fixed_idx = NULL;
+  int *split_parent = NULL, *split_rank = NULL, *split_group_id = NULL;
+  int *split_counts = NULL, *split_offsets = NULL, *split_fill = NULL;
+  int *split_members = NULL, *sub_fixed_idx = NULL;
   int nx_arr[4] = {0}, ny_arr[4] = {0}, ntilings = 0;
   int64_t xbase_arr[4] = {0}, ybase_arr[4] = {0};
   unsigned char *dirty_cur[4] = {NULL}, *dirty_next[4] = {NULL};
   unsigned char *well_centered = NULL;
   short *tmp_flag = NULL;
+  opt_group_workspace ws = {0};
 
   group_xmin = im->w;
   group_xmax = 0;
@@ -791,9 +1251,19 @@ static int optimal_group_solve_localized(
   core_idx = (int *)malloc((size_t)gcount * sizeof(int));
   active_idx = (int *)malloc((size_t)gcount * sizeof(int));
   fixed_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  split_parent = (int *)malloc((size_t)gcount * sizeof(int));
+  split_rank = (int *)malloc((size_t)gcount * sizeof(int));
+  split_group_id = (int *)malloc((size_t)gcount * sizeof(int));
+  split_counts = (int *)malloc((size_t)gcount * sizeof(int));
+  split_offsets = (int *)malloc((size_t)(gcount + 1) * sizeof(int));
+  split_fill = (int *)malloc((size_t)gcount * sizeof(int));
+  split_members = (int *)malloc((size_t)gcount * sizeof(int));
+  sub_fixed_idx = (int *)malloc((size_t)gcount * sizeof(int));
   well_centered = (unsigned char *)calloc((size_t)max_idx + 1, sizeof(unsigned char));
   if (!work_flux || !tmp_flux || !tmp_fluxerr || !tmp_flag || !core_idx || !active_idx ||
-      !fixed_idx || !well_centered) {
+      !fixed_idx || !split_parent || !split_rank || !split_group_id ||
+      !split_counts || !split_offsets || !split_fill || !split_members ||
+      !sub_fixed_idx || !well_centered) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
   }
@@ -833,7 +1303,7 @@ static int optimal_group_solve_localized(
     work_flux[idx] = sum[idx];
   }
 
-  max_sweeps = is_large_group ? 2 : OPT_GROUP_MAX_SWEEPS;
+  max_sweeps = is_large_group ? 1 : OPT_GROUP_MAX_SWEEPS;
   for (sweep = 0; sweep < max_sweeps; sweep++) {
     int converged = 1;
     int pass, npasses;
@@ -918,6 +1388,93 @@ static int optimal_group_solve_localized(
 
               if (core_count == 0 || active_count == 0) continue;
 
+              if (active_count > 1) {
+                int nsub = optimal_group_split_active(
+                    x, y, r, active_count, active_idx, split_parent, split_rank,
+                    split_group_id, split_counts, split_offsets, split_fill,
+                    split_members);
+                if (nsub > 1) {
+                  int changed_count = 0;
+
+                  for (k = 0; k < nsub; k++) {
+                    const int *sub_active = split_members + split_offsets[k];
+                    int sub_active_count = split_counts[k];
+                    int sub_fixed_count = 0;
+                    int si;
+                    int64_t sub_xmin = im->w, sub_xmax = 0;
+                    int64_t sub_ymin = im->h, sub_ymax = 0;
+                    int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
+
+                    for (si = 0; si < sub_active_count; si++) {
+                      int idx = sub_active[si];
+                      if (sxmin_arr[idx] < sub_xmin) sub_xmin = sxmin_arr[idx];
+                      if (sxmax_arr[idx] > sub_xmax) sub_xmax = sxmax_arr[idx];
+                      if (symin_arr[idx] < sub_ymin) sub_ymin = symin_arr[idx];
+                      if (symax_arr[idx] > sub_ymax) sub_ymax = symax_arr[idx];
+                      tmp_flux[idx] = work_flux[idx];
+                      tmp_fluxerr[idx] = sumerr[idx];
+                      tmp_flag[idx] = flag[idx];
+                    }
+
+                    ext_xmin = sub_xmin - (int64_t)(local_radius + 0.5);
+                    ext_xmax = sub_xmax + (int64_t)(local_radius + 0.5);
+                    ext_ymin = sub_ymin - (int64_t)(local_radius + 0.5);
+                    ext_ymax = sub_ymax + (int64_t)(local_radius + 0.5);
+
+                    for (si = 0; si < fixed_count; si++) {
+                      int idx = fixed_idx[si];
+                      if (!optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin,
+                                                ext_ymax, sxmin_arr[idx],
+                                                sxmax_arr[idx], symin_arr[idx],
+                                                symax_arr[idx])) {
+                        continue;
+                      }
+                      sub_fixed_idx[sub_fixed_count++] = idx;
+                    }
+
+                    status = optimal_group_solve_compact(
+                        im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr,
+                        sxmax_arr, symin_arr, symax_arr, trunc_arr, id, subpix,
+                        inflag, sub_active_count, sub_active, sub_fixed_idx,
+                        sub_fixed_count, work_flux, &ws, tmp_flux, tmp_fluxerr,
+                        tmp_flag);
+                    if (status != RETURN_OK) goto cleanup;
+
+                    for (si = 0; si < sub_active_count; si++) {
+                      int idx = sub_active[si];
+                      double old_flux = work_flux[idx];
+                      double new_flux = tmp_flux[idx];
+                      double tol = OPT_GROUP_CONV_ATOL +
+                                   OPT_GROUP_CONV_RTOL *
+                                       (fabs(old_flux) > fabs(new_flux)
+                                            ? fabs(old_flux)
+                                            : fabs(new_flux));
+                      if (fabs(new_flux - old_flux) > tol) {
+                        converged = 0;
+                        core_idx[changed_count++] = idx;
+                      }
+                      work_flux[idx] = tmp_flux[idx];
+                      sum[idx] = tmp_flux[idx];
+                      sumerr[idx] = tmp_fluxerr[idx];
+                      flag[idx] = tmp_flag[idx];
+                    }
+                  }
+
+                  for (k = 0; k < changed_count; k++) {
+                    int idx = core_idx[k];
+                    int64_t mark_xmin, mark_xmax, mark_ymin, mark_ymax;
+                    mark_xmin = sxmin_arr[idx] - (int64_t)(local_radius + 0.5);
+                    mark_xmax = sxmax_arr[idx] + (int64_t)(local_radius + 0.5);
+                    mark_ymin = symin_arr[idx] - (int64_t)(local_radius + 0.5);
+                    mark_ymax = symax_arr[idx] + (int64_t)(local_radius + 0.5);
+                    optimal_mark_tiles_for_bbox(dirty_next[t], nx, ny, xbase, ybase,
+                                                core_span, mark_xmin, mark_xmax,
+                                                mark_ymin, mark_ymax);
+                  }
+                  continue;
+                }
+              }
+
               for (k = 0; k < active_count; k++) {
                 int idx = active_idx[k];
                 tmp_flux[idx] = work_flux[idx];
@@ -925,11 +1482,11 @@ static int optimal_group_solve_localized(
                 tmp_flag[idx] = flag[idx];
               }
 
-              status = optimal_group_solve_exact(
+              status = optimal_group_solve_compact(
                   im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
-                  symin_arr, symax_arr, trunc_arr, id, subpix, inflag, active_count,
-                  active_idx, fixed_idx, fixed_count, work_flux, tmp_flux, tmp_fluxerr,
-                  NULL, tmp_flag);
+                  symin_arr, symax_arr, trunc_arr, id, subpix, inflag,
+                  active_count, active_idx, fixed_idx, fixed_count, work_flux,
+                  &ws, tmp_flux, tmp_fluxerr, tmp_flag);
               if (status != RETURN_OK) goto cleanup;
 
               fixed_count = 0;
@@ -986,7 +1543,6 @@ static int optimal_group_solve_localized(
       int idx = gidx[i];
       int left, right, active_count, fixed_count, k;
       int64_t core_xmin, core_xmax, core_ymin, core_ymax;
-      int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
 
       if (well_centered[idx]) continue;
 
@@ -994,28 +1550,30 @@ static int optimal_group_solve_localized(
       core_xmax = sxmax_arr[idx];
       core_ymin = symin_arr[idx];
       core_ymax = symax_arr[idx];
-      ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
-      ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
-      ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
-      ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
+      {
+        int64_t ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
+        int64_t ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
+        int64_t ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
+        int64_t ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
 
-      left = optimal_group_lower_bound(x, gidx, gcount,
-                                       (double)ext_xmin - max_support_radius);
-      right = optimal_group_upper_bound(x, gidx, gcount,
-                                        (double)ext_xmax + max_support_radius);
+        left = optimal_group_lower_bound(x, gidx, gcount,
+                                         (double)ext_xmin - max_support_radius);
+        right = optimal_group_upper_bound(x, gidx, gcount,
+                                          (double)ext_xmax + max_support_radius);
 
-      active_count = 0;
-      fixed_count = 0;
-      for (k = left; k < right; k++) {
-        int jdx = gidx[k];
-        if (optimal_bbox_overlap(core_xmin, core_xmax, core_ymin, core_ymax,
-                                 sxmin_arr[jdx], sxmax_arr[jdx], symin_arr[jdx],
-                                 symax_arr[jdx])) {
-          active_idx[active_count++] = jdx;
-        } else if (optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
-                                        sxmin_arr[jdx], sxmax_arr[jdx],
-                                        symin_arr[jdx], symax_arr[jdx])) {
-          fixed_idx[fixed_count++] = jdx;
+        active_count = 0;
+        fixed_count = 0;
+        for (k = left; k < right; k++) {
+          int jdx = gidx[k];
+          if (optimal_bbox_overlap(core_xmin, core_xmax, core_ymin, core_ymax,
+                                   sxmin_arr[jdx], sxmax_arr[jdx], symin_arr[jdx],
+                                   symax_arr[jdx])) {
+            active_idx[active_count++] = jdx;
+          } else if (optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
+                                          sxmin_arr[jdx], sxmax_arr[jdx],
+                                          symin_arr[jdx], symax_arr[jdx])) {
+            fixed_idx[fixed_count++] = jdx;
+          }
         }
       }
 
@@ -1047,12 +1605,21 @@ cleanup:
   free(core_idx);
   free(active_idx);
   free(fixed_idx);
+  free(split_parent);
+  free(split_rank);
+  free(split_group_id);
+  free(split_counts);
+  free(split_offsets);
+  free(split_fill);
+  free(split_members);
+  free(sub_fixed_idx);
   for (i = 0; i < ntilings; i++) {
     free(dirty_cur[i]);
     free(dirty_next[i]);
   }
   free(well_centered);
   free(tmp_flag);
+  optimal_group_workspace_free(&ws);
   return status;
 }
 
