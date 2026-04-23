@@ -111,7 +111,10 @@ Set ``grouped=True`` to fit overlapping sources simultaneously:
         data, x, y, psf, grouped=True, group_factor=2.0
     )
 
-Sources are grouped by direct stamp overlap and each group is solved jointly.
+Sources are grouped by direct fit-support overlap and each group is solved
+jointly. If ``fit_radius`` is nonzero, that radius defines the support. If
+``fit_radius`` is zero, SEP derives an effective influence radius from the
+PSF profile instead of using the full stamp extent.
 For small groups SEP uses an exact simultaneous fit. Large connected
 components are handled with overlapping local fits that reuse neighbor
 parameters between passes.
@@ -120,7 +123,8 @@ parameters between passes.
 Values larger than 1 therefore expand the local context used for the fit
 without merging sources that do not directly overlap. This avoids the
 pathological giant-group behavior that can occur in crowded fields when a
-single radius is used for both grouping and fitting extent.
+single radius is used for both grouping and fitting extent. Values below 1
+behave like 1 and therefore do not shrink the support-based neighborhood.
 
 Error model, masks, and flags
 -----------------------------

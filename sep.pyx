@@ -176,6 +176,7 @@ cdef extern from "sep.h":
                                      double *x, double *y, double *r,
                                      double *fwhm, np.int64_t n,
                                      int *id, double group_factor,
+                                     double halo_factor,
                                      int subpix, short inflags,
                                      double *sum, double *sumerr, double *area,
                                      short *flag)
@@ -184,6 +185,7 @@ cdef extern from "sep.h":
                                          double *x, double *y, double *r,
                                          double *fwhm, np.int64_t n,
                                          int *id, double group_factor,
+                                         double halo_factor,
                                          int subpix, short inflags,
                                          double *bkg_mean, double *bkg_mean_err,
                                          double *bkg_weight,
@@ -1259,14 +1261,16 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                        seg_id=None, np.ndarray segmap=None,
                        bkgann=None, bint grouped=False, int subpix=5,
                        double clip_sigma=3.0, int clip_iters=5,
-                       double group_radius_factor=1.0):
+                       double group_radius_factor=1.0,
+                       group_halo_factor=None):
     """sum_circle_optimal(data, x, y, r, fwhm, err=None, var=None,
                            mask=None, maskthresh=0.0,
                            segmap=None, seg_id=None,
                            bkgann=None, gain=None,
                            grouped=False, subpix=5,
                            clip_sigma=3.0, clip_iters=5,
-                           group_radius_factor=1.0)
+                           group_radius_factor=1.0,
+                           group_halo_factor=None)
 
     Optimal extraction in circular aperture(s) using a Gaussian PSF.
 
@@ -1280,7 +1284,9 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
     apertures and solve all fluxes in each group simultaneously; in this
     case the background is estimated per group from the members' annuli.
     ``group_radius_factor`` scales the grouping radius (1.0 matches the
-    aperture overlap criterion).
+    aperture overlap criterion). ``group_halo_factor`` scales the local
+    context halo used within large grouped solves; by default it matches
+    ``group_radius_factor``.
     """
 
     cdef double flux1, fluxerr1, area1
@@ -1300,11 +1306,18 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
     cdef np.ndarray[np.int16_t, ndim=1, mode="c"] flag_arr
     cdef Py_ssize_t n
     cdef Py_ssize_t i
+    cdef double group_halo_factor_val
 
     if (segmap is not None) and (seg_id is None):
         raise ValueError('`segmap` supplied but not `seg_id`.')
     if group_radius_factor <= 0.0:
         raise ValueError('`group_radius_factor` must be positive.')
+    if group_halo_factor is None:
+        group_halo_factor_val = group_radius_factor
+    else:
+        group_halo_factor_val = float(group_halo_factor)
+        if group_halo_factor_val <= 0.0:
+            raise ValueError('`group_halo_factor` must be positive.')
 
     _parse_arrays(data, err, var, mask, segmap, &im)
     im.maskthresh = maskthresh
@@ -1351,22 +1364,6 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
             area_arr = np.empty(n, dtype=np.float64)
             flag_arr = np.empty(n, dtype=np.int16)
 
-            # Common grouped optimal-extraction case: constant Gaussian FWHM and
-            # aperture radius. Reuse the optimized grouped Gaussian PSF path.
-            if (n > 1 and group_radius_factor == 1.0
-                    and np.all(fwhm1 == fwhm1[0])
-                    and np.all(r1 == r1[0])):
-                psf = PSF.from_gaussian(float(fwhm1[0]), oversampling=12)
-                sum1, sumerr1, _, _, flag_arr, _, _ = psf_fit(
-                    data, x1, y1, psf,
-                    var=var, err=err, gain=gain, mask=mask,
-                    maskthresh=maskthresh, seg_id=seg_id1, segmap=segmap,
-                    grouped=True, group_factor=group_radius_factor,
-                    fit_positions=False, fit_radius=float(r1[0]))
-                return (sum1.reshape(shape),
-                        sumerr1.reshape(shape),
-                        flag_arr.reshape(shape))
-
             status = sep_sum_circle_optimal_multi(
                 &im,
                 <double*>x1.data,
@@ -1376,6 +1373,7 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                 n,
                 <int*>seg_id1.data,
                 group_radius_factor,
+                group_halo_factor_val,
                 subpix,
                 0,
                 <double*>sum1.data,
@@ -1490,6 +1488,7 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
             n,
             <int*>seg_id1.data,
             group_radius_factor,
+            group_halo_factor_val,
             subpix,
             0,
             <double*>bkg_mean_arr.data,
@@ -3304,9 +3303,12 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         flux solver at fixed positions for deblending in crowded fields.
     group_factor : float, optional
         Local fitting halo factor for grouped fits (default 2.0). Source
-        connectivity is limited to direct stamp overlap; increasing this value
-        expands the local context used within a grouped fit without merging
-        non-overlapping sources into the same connected component.
+        connectivity is limited to direct fit-support overlap; increasing
+        this value expands the local context used within a grouped fit
+        without merging non-overlapping sources into the same connected
+        component. Values below 1 behave like 1.0. When ``fit_radius=0``,
+        the support used for grouping is derived from the PSF itself rather
+        than from the full stamp extent.
     maxiter : int, optional
         Maximum fitting iterations (default 20).
     fit_positions : bool, optional
@@ -3315,7 +3317,9 @@ def psf_fit(np.ndarray data not None, x, y, PSF psf not None,
         If > 0, only pixels within this radius (in image pixels) of the
         source center participate in the fit. Reduces neighbor contamination
         by limiting the effective stamp size. A value of 0 means use the
-        full PSF stamp (default 0.0). Typical values: 2-3 * FWHM.
+        full PSF stamp for measurement, while grouped fitting still uses a
+        PSF-derived effective influence radius for connectivity (default 0.0).
+        Typical values: 2-3 * FWHM.
     damp_snthresh : float, optional
         S/N threshold for position damping. Sources with S/N well above
         this threshold fit positions freely; sources below are pulled

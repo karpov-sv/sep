@@ -302,7 +302,10 @@ static void uf_union(int *parent, int *rank, int a, int b) {
 #define OPT_GROUP_EXACT_MAX 32
 #define OPT_GROUP_CORE 4
 #define OPT_GROUP_FIXED_MAX 96
-#define OPT_GROUP_SWEEPS 2
+#define OPT_GROUP_EDGE_REFINE_MAX 1024
+#define OPT_GROUP_MAX_SWEEPS 8
+#define OPT_GROUP_CONV_RTOL 1.0e-4
+#define OPT_GROUP_CONV_ATOL 1.0e-6
 
 typedef struct {
   double x;
@@ -396,27 +399,73 @@ static double optimal_circle_overlap(double dx, double dy, double r, double r2,
   return 1.0;
 }
 
-static int optimal_group_contains(const int *idx, int n, int value) {
-  int i;
-  for (i = 0; i < n; i++) {
-    if (idx[i] == value) return 1;
+static int optimal_group_lower_bound(const double *x, const int *gidx, int n,
+                                     double value) {
+  int lo = 0, hi = n;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (x[gidx[mid]] < value) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
   }
-  return 0;
+  return lo;
+}
+
+static int optimal_group_upper_bound(const double *x, const int *gidx, int n,
+                                     double value) {
+  int lo = 0, hi = n;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (x[gidx[mid]] <= value) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+static void optimal_mark_tiles_for_bbox(unsigned char *dirty, int nx, int ny,
+                                        int64_t xbase, int64_t ybase,
+                                        int64_t core_span, int64_t xmin,
+                                        int64_t xmax, int64_t ymin,
+                                        int64_t ymax) {
+  int tx0, tx1, ty0, ty1, tx, ty;
+
+  tx0 = (int)floor(((double)xmin - (double)xbase) / (double)core_span);
+  tx1 = (int)floor(((double)(xmax - 1) - (double)xbase) / (double)core_span);
+  ty0 = (int)floor(((double)ymin - (double)ybase) / (double)core_span);
+  ty1 = (int)floor(((double)(ymax - 1) - (double)ybase) / (double)core_span);
+
+  if (tx0 < 0) tx0 = 0;
+  if (ty0 < 0) ty0 = 0;
+  if (tx1 >= nx) tx1 = nx - 1;
+  if (ty1 >= ny) ty1 = ny - 1;
+  if (tx0 > tx1 || ty0 > ty1) return;
+
+  for (ty = ty0; ty <= ty1; ty++) {
+    for (tx = tx0; tx <= tx1; tx++) {
+      dirty[ty * nx + tx] = 1;
+    }
+  }
 }
 
 static int optimal_group_solve_exact(
     const sep_image *im, const double *x, const double *y, const double *r,
     const double *r2, const double *r_in2, const double *r_out2,
-    const double *sigma_arr, const int *id, int subpix, short inflag,
+    const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
+    const int64_t *symin_arr, const int64_t *symax_arr,
+    const unsigned char *trunc_arr, const int *id, int subpix, short inflag,
     int gcount, const int *gidx, const int *fixed_idx, int fixed_count,
     const double *fixed_flux, double *sum, double *sumerr, double *area,
     short *flag) {
   PIXTYPE pix, varpix;
-  double dx, dy, scale, scale2, offset, tmp, var;
-  int64_t ix, iy, xmin, xmax, ymin, ymax, pos, size, esize, msize, ssize;
+  double dx, dy, overlap, scale, scale2, offset, tmp, var;
+  int64_t ix, iy, xmin, xmax, ymin, ymax, size, esize, msize, ssize;
   int i, j, status, ismasked, use_area;
   short errisarray, errisstd;
-  const BYTE *datat, *errort, *maskt, *segt;
   converter convert, econvert = NULL, mconvert, sconvert;
   int has_pos = 0, has_neg = 0, n_pos = 0, n_neg = 0, n_group_ids = 0;
   int *pos_ids = NULL, *neg_ids = NULL, *group_ids = NULL;
@@ -427,8 +476,7 @@ static int optimal_group_solve_exact(
   if (gcount <= 0) return RETURN_OK;
 
   size = esize = msize = ssize = 0;
-  datat = maskt = segt = NULL;
-  errort = im->noise;
+  status = RETURN_OK;
   errisarray = 0;
   errisstd = 0;
   use_area = (area != NULL);
@@ -454,11 +502,15 @@ static int optimal_group_solve_exact(
   ymax = 0;
   for (i = 0; i < gcount; i++) {
     int idx = gidx[i];
-    int64_t lxmin, lxmax, lymin, lymax;
-    short lflag = 0;
-    boxextent(x[idx], y[idx], r[idx], r[idx], im->w, im->h, &lxmin, &lxmax,
-              &lymin, &lymax, &lflag);
-    flag[idx] |= lflag;
+    int64_t lxmin = sxmin_arr[idx];
+    int64_t lxmax = sxmax_arr[idx];
+    int64_t lymin = symin_arr[idx];
+    int64_t lymax = symax_arr[idx];
+    if (trunc_arr && trunc_arr[idx]) flag[idx] |= SEP_APER_TRUNC;
+    if (lxmin < 0) lxmin = 0;
+    if (lymin < 0) lymin = 0;
+    if (lxmax > im->w) lxmax = im->w;
+    if (lymax > im->h) lymax = im->h;
     if (lxmin < xmin) xmin = lxmin;
     if (lxmax > xmax) xmax = lxmax;
     if (lymin < ymin) ymin = lymin;
@@ -516,22 +568,20 @@ static int optimal_group_solve_exact(
   }
 
   for (iy = ymin; iy < ymax; iy++) {
-    pos = (iy % im->h) * im->w + xmin;
-    datat = MSVC_VOID_CAST im->data + pos * size;
-    if (errisarray) errort = MSVC_VOID_CAST im->noise + pos * esize;
-    if (im->mask) maskt = MSVC_VOID_CAST im->mask + pos * msize;
-    if (im->segmap) segt = MSVC_VOID_CAST im->segmap + pos * ssize;
-
     for (ix = xmin; ix < xmax; ix++) {
-      double union_overlap = 0.0;
+      int64_t pos = iy * im->w + ix;
       double pix_corr;
+      double union_overlap = 0.0;
 
       ismasked = 0;
-      if (im->mask && (mconvert(maskt) > im->maskthresh)) ismasked = 1;
+      if (im->mask &&
+          (mconvert(MSVC_VOID_CAST im->mask + pos * msize) > im->maskthresh)) {
+        ismasked = 1;
+      }
 
       if (im->segmap) {
         int seg_masked = 0;
-        double segval = sconvert(segt);
+        double segval = sconvert(MSVC_VOID_CAST im->segmap + pos * ssize);
         if (has_pos) {
           if (segval > 0.0 && !opt_int_contains(pos_ids, n_pos, (int)segval)) {
             seg_masked = 1;
@@ -542,9 +592,9 @@ static int optimal_group_solve_exact(
         if (seg_masked) ismasked = 1;
       }
 
-      pix = convert(datat);
+      pix = convert(MSVC_VOID_CAST im->data + pos * size);
       if (errisarray) {
-        varpix = econvert(errort);
+        varpix = econvert(MSVC_VOID_CAST im->noise + pos * esize);
         if (errisstd) varpix *= varpix;
       } else if (im->noise_type != SEP_NOISE_NONE) {
         varpix = errisstd ? im->noiseval * im->noiseval : im->noiseval;
@@ -556,60 +606,65 @@ static int optimal_group_solve_exact(
 
       for (i = 0; i < gcount; i++) {
         int idx = gidx[i];
+        if (ix < sxmin_arr[idx] || ix >= sxmax_arr[idx] || iy < symin_arr[idx] ||
+            iy >= symax_arr[idx]) {
+          ai[i] = 0.0;
+          overlaps[i] = 0.0;
+          continue;
+        }
+        if (iy < symin_arr[idx] || iy >= symax_arr[idx]) {
+          ai[i] = 0.0;
+          overlaps[i] = 0.0;
+          continue;
+        }
         dx = ix - x[idx];
         dy = iy - y[idx];
-        overlaps[i] = optimal_circle_overlap(
+        overlap = optimal_circle_overlap(
             dx, dy, r[idx], r2[idx], r_in2[idx], r_out2[idx], subpix, scale,
             scale2, offset);
-        if (overlaps[i] > 0.0) {
+        overlaps[i] = overlap;
+        if (overlap > 0.0) {
           if (use_area) {
-            totarea[i] += overlaps[i];
+            totarea[i] += overlap;
             if (ismasked) {
               flag[idx] |= SEP_APER_HASMASKED;
-              maskarea[i] += overlaps[i];
+              maskarea[i] += overlap;
             }
           }
-          if (overlaps[i] > union_overlap) union_overlap = overlaps[i];
-        }
-        ai[i] = gaussian_pixel_integral(dx, dy, sigma_arr[idx]);
-      }
-
-      if (!ismasked && union_overlap > 0.0) {
-        double scale_overlap = union_overlap;
-        double var_eff = varpix * scale_overlap * scale_overlap;
-        double pix_eff;
-
-        pix_corr = pix;
-        if (fixed_idx && fixed_flux) {
-          for (i = 0; i < fixed_count; i++) {
-            int idx = fixed_idx[i];
-            double sigma_fixed;
-            if (fixed_flux[idx] == 0.0) continue;
-            sigma_fixed = sigma_arr[idx];
-            pix_corr -= fixed_flux[idx] *
-                        gaussian_pixel_integral(ix - x[idx], iy - y[idx],
-                                                sigma_fixed);
-          }
-        }
-
-        pix_eff = pix_corr * scale_overlap;
-        if (var_eff > 0.0) {
-          double w = 1.0 / var_eff;
-          for (i = 0; i < gcount; i++) {
-            ai[i] *= scale_overlap;
-            if (ai[i] <= 0.0) continue;
-            b[i] += w * ai[i] * pix_eff;
-            for (j = 0; j <= i; j++) {
-              if (ai[j] > 0.0) M[i * gcount + j] += w * ai[i] * ai[j];
-            }
-          }
+          if (overlap > union_overlap) union_overlap = overlap;
+          ai[i] = gaussian_pixel_integral(dx, dy, sigma_arr[idx]);
+        } else {
+          ai[i] = 0.0;
         }
       }
 
-      datat += size;
-      if (errisarray) errort += esize;
-      maskt += msize;
-      segt += ssize;
+      if (ismasked || union_overlap <= 0.0) continue;
+
+      pix_corr = pix;
+      if (fixed_idx && fixed_flux) {
+        for (i = 0; i < fixed_count; i++) {
+          int idx = fixed_idx[i];
+          if (fixed_flux[idx] == 0.0) continue;
+          if (ix < sxmin_arr[idx] || ix >= sxmax_arr[idx] || iy < symin_arr[idx] ||
+              iy >= symax_arr[idx]) {
+            continue;
+          }
+          if (iy < symin_arr[idx] || iy >= symax_arr[idx]) {
+            continue;
+          }
+          pix_corr -= fixed_flux[idx] * gaussian_pixel_integral(
+                                          ix - x[idx], iy - y[idx],
+                                          sigma_arr[idx]);
+        }
+      }
+
+      for (i = 0; i < gcount; i++) {
+        if (ai[i] <= 0.0) continue;
+        b[i] += ai[i] * pix_corr / varpix;
+        for (j = 0; j <= i; j++) {
+          if (ai[j] > 0.0) M[i * gcount + j] += ai[i] * ai[j] / varpix;
+        }
+      }
     }
   }
 
@@ -687,19 +742,35 @@ cleanup:
 static int optimal_group_solve_localized(
     const sep_image *im, const double *x, const double *y, const double *r,
     const double *r2, const double *r_in2, const double *r_out2,
-    const double *sigma_arr, const int *id, double group_factor, int subpix,
-    short inflag, int gcount, const int *gidx, double *sum, double *sumerr,
-    double *area, short *flag) {
+    const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
+    const int64_t *symin_arr, const int64_t *symax_arr,
+    const unsigned char *trunc_arr, const int *id, double halo_factor,
+    int subpix, short inflag, int gcount, const int *gidx, double *sum,
+    double *sumerr, double *area, short *flag) {
   int status = RETURN_OK;
-  int i, sweep, block_count, max_idx = -1;
-  double local_radius = 0.0;
+  int i, sweep, max_idx = -1, max_sweeps, is_large_group;
+  double local_radius = 0.0, max_support_radius = 0.0, eff_halo_factor;
+  int64_t group_xmin, group_xmax, group_ymin, group_ymax, core_span, core_shift;
   double *work_flux = NULL, *tmp_flux = NULL, *tmp_fluxerr = NULL;
+  int *core_idx = NULL, *active_idx = NULL, *fixed_idx = NULL;
+  int nx_arr[4] = {0}, ny_arr[4] = {0}, ntilings = 0;
+  int64_t xbase_arr[4] = {0}, ybase_arr[4] = {0};
+  unsigned char *dirty_cur[4] = {NULL}, *dirty_next[4] = {NULL};
+  unsigned char *well_centered = NULL;
   short *tmp_flag = NULL;
 
+  group_xmin = im->w;
+  group_xmax = 0;
+  group_ymin = im->h;
+  group_ymax = 0;
   for (i = 0; i < gcount; i++) {
     int idx = gidx[i];
     if (idx > max_idx) max_idx = idx;
-    if (r[idx] > local_radius) local_radius = r[idx];
+    if (r[idx] > max_support_radius) max_support_radius = r[idx];
+    if (sxmin_arr[idx] < group_xmin) group_xmin = sxmin_arr[idx];
+    if (sxmax_arr[idx] > group_xmax) group_xmax = sxmax_arr[idx];
+    if (symin_arr[idx] < group_ymin) group_ymin = symin_arr[idx];
+    if (symax_arr[idx] > group_ymax) group_ymax = symax_arr[idx];
     status = sep_sum_circle_optimal(
         im, x[idx], y[idx], r[idx], sigma_arr[idx] * 2.354820045,
         id ? id[idx] : 0, subpix, inflag, &sum[idx], &sumerr[idx], &area[idx],
@@ -707,14 +778,54 @@ static int optimal_group_solve_localized(
     if (status != RETURN_OK) return status;
   }
 
-  local_radius *= 2.0 * group_factor;
+  is_large_group = (gcount > OPT_GROUP_EDGE_REFINE_MAX);
+  eff_halo_factor = (halo_factor < 1.0) ? 1.0 : halo_factor;
+  local_radius = 2.0 * max_support_radius * eff_halo_factor;
+  core_span = (int64_t)(4.0 * local_radius + 0.5);
+  if (core_span < 1) core_span = 1;
+  core_shift = core_span / 2;
   work_flux = (double *)calloc((size_t)max_idx + 1, sizeof(double));
   tmp_flux = (double *)calloc((size_t)max_idx + 1, sizeof(double));
   tmp_fluxerr = (double *)calloc((size_t)max_idx + 1, sizeof(double));
   tmp_flag = (short *)calloc((size_t)max_idx + 1, sizeof(short));
-  if (!work_flux || !tmp_flux || !tmp_fluxerr || !tmp_flag) {
+  core_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  active_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  fixed_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  well_centered = (unsigned char *)calloc((size_t)max_idx + 1, sizeof(unsigned char));
+  if (!work_flux || !tmp_flux || !tmp_fluxerr || !tmp_flag || !core_idx || !active_idx ||
+      !fixed_idx || !well_centered) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
+  }
+
+  {
+    int64_t x_offsets[2] = {0, core_shift};
+    int64_t y_offsets[2] = {0, core_shift};
+    int nxoff = (!is_large_group && core_shift > 0) ? 2 : 1;
+    int nyoff = (!is_large_group && core_shift > 0) ? 2 : 1;
+    int xoi, yoi;
+
+    for (xoi = 0; xoi < nxoff; xoi++) {
+      for (yoi = 0; yoi < nyoff; yoi++) {
+        int t = xoi * nyoff + yoi;
+        int ntiles;
+        xbase_arr[t] = group_xmin - x_offsets[xoi];
+        ybase_arr[t] = group_ymin - y_offsets[yoi];
+        nx_arr[t] =
+            (int)((group_xmax - xbase_arr[t] + core_span - 1) / core_span);
+        ny_arr[t] =
+            (int)((group_ymax - ybase_arr[t] + core_span - 1) / core_span);
+        ntiles = nx_arr[t] * ny_arr[t];
+        dirty_cur[t] = (unsigned char *)malloc((size_t)ntiles);
+        dirty_next[t] = (unsigned char *)calloc((size_t)ntiles, sizeof(unsigned char));
+        if (!dirty_cur[t] || !dirty_next[t]) {
+          status = MEMORY_ALLOC_ERROR;
+          goto cleanup;
+        }
+        memset(dirty_cur[t], 1, (size_t)ntiles);
+        ntilings++;
+      }
+    }
   }
 
   for (i = 0; i < gcount; i++) {
@@ -722,105 +833,210 @@ static int optimal_group_solve_localized(
     work_flux[idx] = sum[idx];
   }
 
-  block_count = (gcount + OPT_GROUP_CORE - 1) / OPT_GROUP_CORE;
-  for (sweep = 0; sweep < OPT_GROUP_SWEEPS; sweep++) {
-    int pass;
+  max_sweeps = is_large_group ? 2 : OPT_GROUP_MAX_SWEEPS;
+  for (sweep = 0; sweep < max_sweeps; sweep++) {
+    int converged = 1;
+    int pass, npasses;
 
-    for (pass = 0; pass < 2; pass++) {
-      int block_start = pass == 0 ? 0 : block_count - 1;
-      int block_stop = pass == 0 ? block_count : -1;
-      int block_step = pass == 0 ? 1 : -1;
-      int block;
+    for (i = 0; i < ntilings; i++) {
+      memset(dirty_next[i], 0, (size_t)nx_arr[i] * (size_t)ny_arr[i]);
+    }
 
-      for (block = block_start; block != block_stop; block += block_step) {
-        int start = block * OPT_GROUP_CORE;
-        int count = gcount - start;
-        int left, right, active_count, fixed_count, k;
-        int active_idx[OPT_GROUP_EXACT_MAX];
-        int fixed_idx[OPT_GROUP_FIXED_MAX];
-        int64_t core_xmin, core_xmax, core_ymin, core_ymax;
-        int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
+    npasses = is_large_group ? 1 : 2;
+    for (pass = 0; pass < npasses; pass++) {
+      int nxoff = (!is_large_group && core_shift > 0) ? 2 : 1;
+      int nyoff = (!is_large_group && core_shift > 0) ? 2 : 1;
+      int xoi, yoi;
 
-        if (count > OPT_GROUP_CORE) count = OPT_GROUP_CORE;
-        core_xmin = (int64_t)im->w;
-        core_xmax = 0;
-        core_ymin = (int64_t)im->h;
-        core_ymax = 0;
+      for (xoi = 0; xoi < nxoff; xoi++) {
+        int xsel = pass == 0 ? xoi : (nxoff - 1 - xoi);
+        int nx = nx_arr[xsel * nyoff];
+        int xi_start = pass == 0 ? 0 : (nx - 1);
+        int xi_stop = pass == 0 ? nx : -1;
+        int xi_step = pass == 0 ? 1 : -1;
 
-        for (i = 0; i < count; i++) {
-          int idx = gidx[start + i];
-          int64_t sxmin, sxmax, symin, symax;
-          optimal_source_bbox(x[idx], y[idx], r[idx], &sxmin, &sxmax, &symin,
-                              &symax);
-          if (sxmin < core_xmin) core_xmin = sxmin;
-          if (sxmax > core_xmax) core_xmax = sxmax;
-          if (symin < core_ymin) core_ymin = symin;
-          if (symax > core_ymax) core_ymax = symax;
-        }
+        for (yoi = 0; yoi < nyoff; yoi++) {
+          int ysel = pass == 0 ? yoi : (nyoff - 1 - yoi);
+          int t = xsel * nyoff + ysel;
+          int64_t xbase = xbase_arr[t];
+          int64_t ybase = ybase_arr[t];
+          int nx = nx_arr[t];
+          int ny = ny_arr[t];
+          int yi_start = pass == 0 ? 0 : (ny - 1);
+          int yi_stop = pass == 0 ? ny : -1;
+          int yi_step = pass == 0 ? 1 : -1;
 
-        ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
-        ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
-        ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
-        ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
+          for (i = xi_start; i != xi_stop; i += xi_step) {
+            int yi;
+            int64_t core_xmin = xbase + (int64_t)i * core_span;
+            int64_t core_xmax = core_xmin + core_span;
 
-        left = start;
-        while (left > 0 &&
-               x[gidx[left - 1]] + r[gidx[left - 1]] >= (double)ext_xmin)
-          left--;
-        right = start + count;
-        while (right < gcount &&
-               x[gidx[right]] - r[gidx[right]] <= (double)ext_xmax)
-          right++;
+            for (yi = yi_start; yi != yi_stop; yi += yi_step) {
+              int left, right, core_count, active_count, fixed_count, k;
+              int tile_idx = yi * nx + i;
+              int64_t core_ymin = ybase + (int64_t)yi * core_span;
+              int64_t core_ymax = core_ymin + core_span;
+              int64_t ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
+              int64_t ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
+              int64_t ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
+              int64_t ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
 
-        active_count = 0;
-        for (k = left; k < right && active_count < OPT_GROUP_EXACT_MAX; k++) {
-          int idx = gidx[k];
-          int64_t sxmin, sxmax, symin, symax;
-          optimal_source_bbox(x[idx], y[idx], r[idx], &sxmin, &sxmax, &symin,
-                              &symax);
-          if (!optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
-                                    sxmin, sxmax, symin, symax))
-            continue;
-          active_idx[active_count++] = idx;
-        }
+              if (!dirty_cur[t][tile_idx]) continue;
 
-        fixed_count = 0;
-        for (k = left; k < right && fixed_count < OPT_GROUP_FIXED_MAX; k++) {
-          int idx = gidx[k];
-          int64_t sxmin, sxmax, symin, symax;
-          if (optimal_group_contains(active_idx, active_count, idx)) continue;
-          optimal_source_bbox(x[idx], y[idx], r[idx], &sxmin, &sxmax, &symin,
-                              &symax);
-          if (!optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
-                                    sxmin, sxmax, symin, symax))
-            continue;
-          fixed_idx[fixed_count++] = idx;
-        }
+              left = optimal_group_lower_bound(x, gidx, gcount,
+                                               (double)ext_xmin - max_support_radius);
+              right = optimal_group_upper_bound(x, gidx, gcount,
+                                                (double)ext_xmax + max_support_radius);
+              core_count = 0;
+              active_count = 0;
+              fixed_count = 0;
 
-        for (i = 0; i < active_count; i++) {
-          int idx = active_idx[i];
-          tmp_flux[idx] = work_flux[idx];
-          tmp_fluxerr[idx] = sumerr[idx];
-          tmp_flag[idx] = flag[idx];
-        }
+              for (k = left; k < right; k++) {
+                int idx = gidx[k];
+                int in_core, in_ext;
+                in_core = optimal_bbox_overlap(core_xmin, core_xmax, core_ymin,
+                                               core_ymax, sxmin_arr[idx],
+                                               sxmax_arr[idx], symin_arr[idx],
+                                               symax_arr[idx]);
+                in_ext = optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin,
+                                              ext_ymax, sxmin_arr[idx],
+                                              sxmax_arr[idx], symin_arr[idx],
+                                              symax_arr[idx]);
+                if (in_core) {
+                  core_idx[core_count++] = idx;
+                  active_idx[active_count++] = idx;
+                  if ((double)(sxmin_arr[idx] - core_xmin) > local_radius &&
+                      (double)(core_xmax - sxmax_arr[idx]) > local_radius &&
+                      (double)(symin_arr[idx] - core_ymin) > local_radius &&
+                      (double)(core_ymax - symax_arr[idx]) > local_radius) {
+                    well_centered[idx] = 1;
+                  }
+                } else if (in_ext) {
+                  fixed_idx[fixed_count++] = idx;
+                }
+              }
 
-        status = optimal_group_solve_exact(
-            im, x, y, r, r2, r_in2, r_out2, sigma_arr, id, subpix, inflag,
-            active_count, active_idx, fixed_idx, fixed_count, work_flux, tmp_flux,
-            tmp_fluxerr, NULL, tmp_flag);
-        if (status != RETURN_OK) goto cleanup;
+              if (core_count == 0 || active_count == 0) continue;
 
-        for (i = 0; i < active_count; i++) {
-          int idx = active_idx[i];
-          work_flux[idx] = tmp_flux[idx];
-        }
-        for (i = 0; i < count; i++) {
-          int idx = gidx[start + i];
-          sum[idx] = tmp_flux[idx];
-          sumerr[idx] = tmp_fluxerr[idx];
-          flag[idx] = tmp_flag[idx];
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                tmp_flux[idx] = work_flux[idx];
+                tmp_fluxerr[idx] = sumerr[idx];
+                tmp_flag[idx] = flag[idx];
+              }
+
+              status = optimal_group_solve_exact(
+                  im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
+                  symin_arr, symax_arr, trunc_arr, id, subpix, inflag, active_count,
+                  active_idx, fixed_idx, fixed_count, work_flux, tmp_flux, tmp_fluxerr,
+                  NULL, tmp_flag);
+              if (status != RETURN_OK) goto cleanup;
+
+              fixed_count = 0;
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                double old_flux = work_flux[idx];
+                double new_flux = tmp_flux[idx];
+                double tol = OPT_GROUP_CONV_ATOL +
+                             OPT_GROUP_CONV_RTOL *
+                                 (fabs(old_flux) > fabs(new_flux) ? fabs(old_flux)
+                                                                  : fabs(new_flux));
+                if (fabs(new_flux - old_flux) > tol) {
+                  converged = 0;
+                  fixed_idx[fixed_count++] = idx;
+                }
+              }
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                work_flux[idx] = tmp_flux[idx];
+              }
+              for (k = 0; k < core_count; k++) {
+                int idx = core_idx[k];
+                sum[idx] = tmp_flux[idx];
+                sumerr[idx] = tmp_fluxerr[idx];
+                flag[idx] = tmp_flag[idx];
+              }
+              for (k = 0; k < fixed_count; k++) {
+                int idx = fixed_idx[k];
+                int64_t mark_xmin, mark_xmax, mark_ymin, mark_ymax;
+                mark_xmin = sxmin_arr[idx] - (int64_t)(local_radius + 0.5);
+                mark_xmax = sxmax_arr[idx] + (int64_t)(local_radius + 0.5);
+                mark_ymin = symin_arr[idx] - (int64_t)(local_radius + 0.5);
+                mark_ymax = symax_arr[idx] + (int64_t)(local_radius + 0.5);
+                optimal_mark_tiles_for_bbox(dirty_next[t], nx, ny, xbase, ybase,
+                                            core_span, mark_xmin, mark_xmax,
+                                            mark_ymin, mark_ymax);
+              }
+            }
+          }
         }
       }
+    }
+
+    if (converged) break;
+    for (i = 0; i < ntilings; i++) {
+      unsigned char *tmp = dirty_cur[i];
+      dirty_cur[i] = dirty_next[i];
+      dirty_next[i] = tmp;
+    }
+  }
+
+  if (gcount <= OPT_GROUP_EDGE_REFINE_MAX) {
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      int left, right, active_count, fixed_count, k;
+      int64_t core_xmin, core_xmax, core_ymin, core_ymax;
+      int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
+
+      if (well_centered[idx]) continue;
+
+      core_xmin = sxmin_arr[idx];
+      core_xmax = sxmax_arr[idx];
+      core_ymin = symin_arr[idx];
+      core_ymax = symax_arr[idx];
+      ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
+      ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
+      ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
+      ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
+
+      left = optimal_group_lower_bound(x, gidx, gcount,
+                                       (double)ext_xmin - max_support_radius);
+      right = optimal_group_upper_bound(x, gidx, gcount,
+                                        (double)ext_xmax + max_support_radius);
+
+      active_count = 0;
+      fixed_count = 0;
+      for (k = left; k < right; k++) {
+        int jdx = gidx[k];
+        if (optimal_bbox_overlap(core_xmin, core_xmax, core_ymin, core_ymax,
+                                 sxmin_arr[jdx], sxmax_arr[jdx], symin_arr[jdx],
+                                 symax_arr[jdx])) {
+          active_idx[active_count++] = jdx;
+        } else if (optimal_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
+                                        sxmin_arr[jdx], sxmax_arr[jdx],
+                                        symin_arr[jdx], symax_arr[jdx])) {
+          fixed_idx[fixed_count++] = jdx;
+        }
+      }
+
+      for (k = 0; k < active_count; k++) {
+        int jdx = active_idx[k];
+        tmp_flux[jdx] = work_flux[jdx];
+        tmp_fluxerr[jdx] = sumerr[jdx];
+        tmp_flag[jdx] = flag[jdx];
+      }
+
+      status = optimal_group_solve_exact(
+          im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
+          symin_arr, symax_arr, trunc_arr, id, subpix, inflag, active_count,
+          active_idx, fixed_idx, fixed_count, work_flux, tmp_flux, tmp_fluxerr,
+          area, tmp_flag);
+      if (status != RETURN_OK) goto cleanup;
+
+      work_flux[idx] = tmp_flux[idx];
+      sum[idx] = tmp_flux[idx];
+      sumerr[idx] = tmp_fluxerr[idx];
+      flag[idx] = tmp_flag[idx];
     }
   }
 
@@ -828,6 +1044,14 @@ cleanup:
   free(work_flux);
   free(tmp_flux);
   free(tmp_fluxerr);
+  free(core_idx);
+  free(active_idx);
+  free(fixed_idx);
+  for (i = 0; i < ntilings; i++) {
+    free(dirty_cur[i]);
+    free(dirty_next[i]);
+  }
+  free(well_centered);
   free(tmp_flag);
   return status;
 }
@@ -1096,6 +1320,7 @@ static int sep_sum_circle_optimal_multi_impl(
     int64_t n,
     const int * id,
     double group_factor,
+    double halo_factor,
     int subpix,
     short inflag,
     const double * bkg_mean,
@@ -1113,11 +1338,14 @@ static int sep_sum_circle_optimal_multi_impl(
   int *group_counts = NULL, *group_offsets = NULL, *group_fill = NULL;
   int *members = NULL;
   double *r2 = NULL, *r_in2 = NULL, *r_out2 = NULL, *sigma_arr = NULL;
+  int64_t *sxmin_arr = NULL, *sxmax_arr = NULL, *symin_arr = NULL, *symax_arr = NULL;
+  unsigned char *trunc_arr = NULL;
   opt_xorder_entry *xorder = NULL;
   opt_group_order_entry *group_order = NULL;
 
   if (n < 1) return ILLEGAL_APER_PARAMS;
   if (!(group_factor > 0.0)) return ILLEGAL_APER_PARAMS;
+  if (!(halo_factor > 0.0)) return ILLEGAL_APER_PARAMS;
   if (subpix < 0) return ILLEGAL_SUBPIX;
 
   use_bkg = (bkg_mean != NULL);
@@ -1133,11 +1361,17 @@ static int sep_sum_circle_optimal_multi_impl(
   r_in2 = (double *)malloc((size_t)n * sizeof(double));
   r_out2 = (double *)malloc((size_t)n * sizeof(double));
   sigma_arr = (double *)malloc((size_t)n * sizeof(double));
+  sxmin_arr = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+  sxmax_arr = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+  symin_arr = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+  symax_arr = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+  trunc_arr = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
   xorder = (opt_xorder_entry *)malloc((size_t)n * sizeof(opt_xorder_entry));
 
   if (!parent || !rank || !group_id || !root_map || !group_counts ||
       !group_offsets || !group_fill || !members || !r2 || !r_in2 || !r_out2 ||
-      !sigma_arr || !xorder) {
+      !sigma_arr || !sxmin_arr || !sxmax_arr || !symin_arr || !symax_arr ||
+      !trunc_arr || !xorder) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
   }
@@ -1156,10 +1390,16 @@ static int sep_sum_circle_optimal_multi_impl(
       status = ILLEGAL_APER_PARAMS;
       goto cleanup;
     }
+    optimal_source_bbox(x[i], y[i], r[i], &sxmin_arr[i], &sxmax_arr[i],
+                        &symin_arr[i], &symax_arr[i]);
+    trunc_arr[i] = (sxmin_arr[i] < 0 || sxmax_arr[i] > im->w || symin_arr[i] < 0 ||
+                    symax_arr[i] > im->h)
+                       ? 1
+                       : 0;
     if (r[i] > max_r) max_r = r[i];
     xorder[i].x = x[i];
     xorder[i].idx = i;
-    flag[i] = 0;
+    flag[i] = trunc_arr[i] ? SEP_APER_TRUNC : 0;
     sum[i] = 0.0;
     sumerr[i] = 0.0;
     area[i] = 0.0;
@@ -1259,12 +1499,14 @@ static int sep_sum_circle_optimal_multi_impl(
           inflag, &sum[idx], &sumerr[idx], &area[idx], &flag[idx]);
     } else if (gcount <= OPT_GROUP_EXACT_MAX) {
       status = optimal_group_solve_exact(
-          im, x, y, r, r2, r_in2, r_out2, sigma_arr, id, subpix, inflag,
-          gcount, gidx, NULL, 0, NULL, sum, sumerr, area, flag);
+          im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
+          symin_arr, symax_arr, trunc_arr, id, subpix, inflag, gcount, gidx,
+          NULL, 0, NULL, sum, sumerr, area, flag);
     } else {
       status = optimal_group_solve_localized(
-          im, x, y, r, r2, r_in2, r_out2, sigma_arr, id, group_factor, subpix,
-          inflag, gcount, gidx, sum, sumerr, area, flag);
+          im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
+          symin_arr, symax_arr, trunc_arr, id, halo_factor, subpix, inflag,
+          gcount, gidx, sum, sumerr, area, flag);
     }
     if (status != RETURN_OK) goto cleanup;
 
@@ -1300,6 +1542,11 @@ cleanup:
   free(r_in2);
   free(r_out2);
   free(sigma_arr);
+  free(sxmin_arr);
+  free(sxmax_arr);
+  free(symin_arr);
+  free(symax_arr);
+  free(trunc_arr);
   return status;
 }
 
@@ -1315,6 +1562,7 @@ int sep_sum_circle_optimal_multi(
     int64_t n,
     const int * id,
     double group_factor,
+    double halo_factor,
     int subpix,
     short inflag,
     double * sum,
@@ -1323,7 +1571,7 @@ int sep_sum_circle_optimal_multi(
     short * flag
 ) {
   return sep_sum_circle_optimal_multi_impl(
-      im, x, y, r, fwhm, n, id, group_factor, subpix, inflag,
+      im, x, y, r, fwhm, n, id, group_factor, halo_factor, subpix, inflag,
       NULL, NULL, NULL, sum, sumerr, area, flag
   );
 }
@@ -1337,6 +1585,7 @@ int sep_sum_circle_optimal_multi_bkg(
     int64_t n,
     const int * id,
     double group_factor,
+    double halo_factor,
     int subpix,
     short inflag,
     const double * bkg_mean,
@@ -1348,7 +1597,7 @@ int sep_sum_circle_optimal_multi_bkg(
     short * flag
 ) {
   return sep_sum_circle_optimal_multi_impl(
-      im, x, y, r, fwhm, n, id, group_factor, subpix, inflag,
+      im, x, y, r, fwhm, n, id, group_factor, halo_factor, subpix, inflag,
       bkg_mean, bkg_mean_err, bkg_weight, sum, sumerr, area, flag
   );
 }

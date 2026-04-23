@@ -388,6 +388,7 @@ SEP_API int sep_sum_circle_optimal_multi(
     int64_t n,
     const int * id,
     double group_factor,
+    double halo_factor,
     int subpix,
     short inflags,
     double * sum,
@@ -411,6 +412,7 @@ SEP_API int sep_sum_circle_optimal_multi_bkg(
     int64_t n,
     const int * id,
     double group_factor,
+    double halo_factor,
     int subpix,
     short inflags,
     const double * bkg_mean,
@@ -843,8 +845,11 @@ SEP_API int sep_psf_fit_array(
 
 /* sep_psf_fit_multi()
  *
- * Grouped PSF fitting for multiple sources. Sources whose stamps overlap
- * are fitted simultaneously. Uses union-find grouping.
+ * Grouped PSF fitting for multiple sources. Sources whose direct fit supports
+ * overlap are fitted simultaneously. The fit support comes from fit_radius
+ * when set, otherwise from an effective influence radius derived from the
+ * PSF profile. Uses union-find grouping; group_factor expands the local halo
+ * used by the localized solver without changing the connectivity graph.
  */
 SEP_API int sep_psf_fit_multi(
     const sep_image * im,

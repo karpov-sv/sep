@@ -75,10 +75,13 @@ static void build_interp_lut(float *lut, int size) {
 #define PSF_NA 3          /* parameters per component: flux, dx, dy */
 #define PSF_GROUP_EXACT_MAX 64
 #define PSF_GROUP_CORE 16
-#define PSF_GROUP_SWEEPS 2
+#define PSF_GROUP_MAX_SWEEPS 8
+#define PSF_GROUP_CONV_RTOL 1.0e-4
+#define PSF_GROUP_CONV_ATOL 1.0e-8
 #define PSF_GROUP_SVD_TOL 1.0e-4
 #define PSF_FLUX_NNLS_MAXITER 512
 #define PSF_FLUX_NNLS_TOL 1.0e-10
+#define PSF_GROUP_INFLUENCE_REL 1.0e-2
 
 /*--------------------------------------------------------------------------*/
 /* SVD solver macros (from SExtractor psf.c, Numerical Recipes)             */
@@ -1551,6 +1554,58 @@ static int psf_int_contains(const int *arr, int n, int value) {
   return 0;
 }
 
+static int psf_group_lower_bound(const double *x, const int *gidx, int n,
+                                 double value) {
+  int lo = 0, hi = n;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (x[gidx[mid]] < value) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+static int psf_group_upper_bound(const double *x, const int *gidx, int n,
+                                 double value) {
+  int lo = 0, hi = n;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (x[gidx[mid]] <= value) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+static void psf_mark_tiles_for_bbox(unsigned char *dirty, int nx, int ny,
+                                    int64_t xbase, int64_t ybase,
+                                    int64_t core_span, int64_t xmin,
+                                    int64_t xmax, int64_t ymin, int64_t ymax) {
+  int tx0, tx1, ty0, ty1, tx, ty;
+
+  tx0 = (int)floor(((double)xmin - (double)xbase) / (double)core_span);
+  tx1 = (int)floor(((double)(xmax - 1) - (double)xbase) / (double)core_span);
+  ty0 = (int)floor(((double)ymin - (double)ybase) / (double)core_span);
+  ty1 = (int)floor(((double)(ymax - 1) - (double)ybase) / (double)core_span);
+
+  if (tx0 < 0) tx0 = 0;
+  if (ty0 < 0) ty0 = 0;
+  if (tx1 >= nx) tx1 = nx - 1;
+  if (ty1 >= ny) ty1 = ny - 1;
+  if (tx0 > tx1 || ty0 > ty1) return;
+
+  for (ty = ty0; ty <= ty1; ty++) {
+    for (tx = tx0; tx <= tx1; tx++) {
+      dirty[ty * nx + tx] = 1;
+    }
+  }
+}
+
 static int psf_stamp_pixel_in_fit_radius(int sx, int sy, int width, int height,
                                          double dx, double dy,
                                          double fit_radius) {
@@ -1855,6 +1910,61 @@ static void psf_source_bbox(double x, double y, int width, int height,
   *xmax = *xmin + width;
   *ymin = (int64_t)ciy - height / 2;
   *ymax = *ymin + height;
+}
+
+static void psf_support_bbox(double x, double y, double support_radius,
+                             int64_t *xmin, int64_t *xmax, int64_t *ymin,
+                             int64_t *ymax) {
+  int cix = (int)(x + 0.5);
+  int ciy = (int)(y + 0.5);
+  int rceil = (int)ceil(support_radius);
+
+  *xmin = (int64_t)cix - rceil;
+  *xmax = (int64_t)cix + rceil + 1;
+  *ymin = (int64_t)ciy - rceil;
+  *ymax = (int64_t)ciy + rceil + 1;
+}
+
+static void psf_normalize_resampled(sep_psf *psf) {
+  double psfsum = 0.0;
+  int p;
+
+  for (p = 0; p < psf->rw * psf->rh; p++) psfsum += psf->resi[p];
+  if (psfsum > 0.0) {
+    for (p = 0; p < psf->rw * psf->rh; p++) psf->resi[p] /= (float)psfsum;
+  }
+}
+
+static double psf_current_effective_radius(const sep_psf *psf) {
+  double peak = 0.0, thresh, max_r2 = 0.0;
+  double cx = (double)(psf->rw / 2);
+  double cy = (double)(psf->rh / 2);
+  int sx, sy;
+
+  for (sy = 0; sy < psf->rh; sy++) {
+    for (sx = 0; sx < psf->rw; sx++) {
+      double val = fabs((double)psf->resi[sy * psf->rw + sx]);
+      if (val > peak) peak = val;
+    }
+  }
+
+  if (!(peak > 0.0)) return 0.5;
+
+  thresh = peak * PSF_GROUP_INFLUENCE_REL;
+  for (sy = 0; sy < psf->rh; sy++) {
+    for (sx = 0; sx < psf->rw; sx++) {
+      double val = fabs((double)psf->resi[sy * psf->rw + sx]);
+      double dx, dy, r2;
+      if (val < thresh) continue;
+      dx = (double)sx - cx;
+      dy = (double)sy - cy;
+      r2 = dx * dx + dy * dy;
+      if (r2 > max_r2) max_r2 = r2;
+    }
+  }
+
+  if (!(max_r2 > 0.0)) return 0.5;
+  return sqrt(max_r2);
 }
 
 static int psf_bbox_overlap(int64_t xmin1, int64_t xmax1, int64_t ymin1,
@@ -3486,7 +3596,9 @@ static int psf_compute_subset_chi2(const sep_image *im, sep_psf *psf,
 
 static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
                                    const double *x, const double *y,
-                                   const int *id, double local_radius,
+                                   const int *id,
+                                   const double *support_radius_arr,
+                                   double halo_factor,
                                    short inflag, int maxiter,
                                    int fit_positions,
                                    int gcount,
@@ -3497,11 +3609,18 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
                                    double *pyerr, int *pniter, double *pchi2,
                                    short *pflag) {
   int status = RETURN_OK;
-  int i, sweep, block_count;
+  int i, sweep;
   int refine_maxiter = maxiter;
   int max_idx = -1;
   size_t arr_len;
+  double local_radius = 0.0, max_support_radius = 0.0, eff_halo_factor;
+  int64_t group_xmin, group_xmax, group_ymin, group_ymax, core_span, core_shift;
   double *work_flux = NULL, *tmp_flux = NULL, *tmp_fluxerr = NULL;
+  int *core_idx = NULL, *active_idx = NULL;
+  int nx_arr[4] = {0}, ny_arr[4] = {0}, ntilings = 0;
+  int64_t xbase_arr[4] = {0}, ybase_arr[4] = {0};
+  unsigned char *dirty_cur[4] = {NULL}, *dirty_next[4] = {NULL};
+  unsigned char *well_centered = NULL;
   short *tmp_flag = NULL;
   /* For flux-only mode, use original x/y for positions throughout;
    * for fit_positions mode, use fitted pxfit/pyfit. */
@@ -3510,9 +3629,23 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
 
   if (refine_maxiter > 4) refine_maxiter = 4;
 
+  group_xmin = im->w;
+  group_xmax = 0;
+  group_ymin = im->h;
+  group_ymax = 0;
   for (i = 0; i < gcount; i++) {
     int idx = gidx[i];
+    int64_t sxmin, sxmax, symin, symax;
     if (idx > max_idx) max_idx = idx;
+    if (support_radius_arr[idx] > max_support_radius) {
+      max_support_radius = support_radius_arr[idx];
+    }
+    psf_support_bbox(pos_x[idx], pos_y[idx], support_radius_arr[idx], &sxmin,
+                     &sxmax, &symin, &symax);
+    if (sxmin < group_xmin) group_xmin = sxmin;
+    if (sxmax > group_xmax) group_xmax = sxmax;
+    if (symin < group_ymin) group_ymin = symin;
+    if (symax > group_ymax) group_ymax = symax;
     if (fit_positions) {
       status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
                            maxiter, &pflux[idx], &pfluxerr[idx], &pxfit[idx],
@@ -3526,14 +3659,55 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
     if (status != RETURN_OK) return status;
   }
 
+  eff_halo_factor = (halo_factor < 1.0) ? 1.0 : halo_factor;
+  local_radius = 2.0 * max_support_radius * eff_halo_factor;
+  core_span = (int64_t)(4.0 * local_radius + 0.5);
+  if (core_span < 1) core_span = 1;
+  core_shift = core_span / 2;
+
   arr_len = (size_t)max_idx + 1;
   work_flux = (double *)calloc(arr_len, sizeof(double));
   tmp_flux = (double *)calloc(arr_len, sizeof(double));
   tmp_fluxerr = (double *)calloc(arr_len, sizeof(double));
   tmp_flag = (short *)calloc(arr_len, sizeof(short));
-  if (!work_flux || !tmp_flux || !tmp_fluxerr || !tmp_flag) {
+  core_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  active_idx = (int *)malloc((size_t)gcount * sizeof(int));
+  well_centered = (unsigned char *)calloc(arr_len, sizeof(unsigned char));
+  if (!work_flux || !tmp_flux || !tmp_fluxerr || !tmp_flag || !core_idx ||
+      !active_idx ||
+      !well_centered) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
+  }
+
+  {
+    int64_t x_offsets[2] = {0, core_shift};
+    int64_t y_offsets[2] = {0, core_shift};
+    int nxoff = (core_shift > 0) ? 2 : 1;
+    int nyoff = (core_shift > 0) ? 2 : 1;
+    int xoi, yoi;
+
+    for (xoi = 0; xoi < nxoff; xoi++) {
+      for (yoi = 0; yoi < nyoff; yoi++) {
+        int t = xoi * nyoff + yoi;
+        int ntiles;
+        xbase_arr[t] = group_xmin - x_offsets[xoi];
+        ybase_arr[t] = group_ymin - y_offsets[yoi];
+        nx_arr[t] =
+            (int)((group_xmax - xbase_arr[t] + core_span - 1) / core_span);
+        ny_arr[t] =
+            (int)((group_ymax - ybase_arr[t] + core_span - 1) / core_span);
+        ntiles = nx_arr[t] * ny_arr[t];
+        dirty_cur[t] = (unsigned char *)malloc((size_t)ntiles);
+        dirty_next[t] = (unsigned char *)calloc((size_t)ntiles, sizeof(unsigned char));
+        if (!dirty_cur[t] || !dirty_next[t]) {
+          status = MEMORY_ALLOC_ERROR;
+          goto cleanup;
+        }
+        memset(dirty_cur[t], 1, (size_t)ntiles);
+        ntilings++;
+      }
+    }
   }
 
   for (i = 0; i < gcount; i++) {
@@ -3541,156 +3715,199 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
     work_flux[idx] = pflux[idx];
   }
 
-  block_count = (gcount + PSF_GROUP_CORE - 1) / PSF_GROUP_CORE;
-  for (sweep = 0; sweep < PSF_GROUP_SWEEPS; sweep++) {
-    int block;
+  for (sweep = 0; sweep < PSF_GROUP_MAX_SWEEPS; sweep++) {
+    int converged = 1;
+    int pass;
 
-    for (block = 0; block < block_count; block++) {
-      int start = block * PSF_GROUP_CORE;
-      int count = gcount - start;
-      int left, right, active_count, k;
-      int active_idx[PSF_GROUP_EXACT_MAX];
-      int64_t core_xmin, core_xmax, core_ymin, core_ymax;
-      int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
-      if (count > PSF_GROUP_CORE) count = PSF_GROUP_CORE;
+    for (i = 0; i < ntilings; i++) {
+      memset(dirty_next[i], 0, (size_t)nx_arr[i] * (size_t)ny_arr[i]);
+    }
 
-      core_xmin = (int64_t)im->w;
-      core_xmax = 0;
-      core_ymin = (int64_t)im->h;
-      core_ymax = 0;
-      for (i = 0; i < count; i++) {
-        int idx = gidx[start + i];
-        int64_t sxmin, sxmax, symin, symax;
-        psf_source_bbox(pos_x[idx], pos_y[idx], psf->rw, psf->rh, &sxmin, &sxmax,
-                        &symin, &symax);
-        if (sxmin < core_xmin) core_xmin = sxmin;
-        if (sxmax > core_xmax) core_xmax = sxmax;
-        if (symin < core_ymin) core_ymin = symin;
-        if (symax > core_ymax) core_ymax = symax;
-      }
-      ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
-      ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
-      ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
-      ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
+    for (pass = 0; pass < 2; pass++) {
+      int nxoff = (core_shift > 0) ? 2 : 1;
+      int nyoff = (core_shift > 0) ? 2 : 1;
+      int xoi, yoi;
 
-      left = start;
-      while (left > 0 &&
-             pos_x[gidx[left - 1]] + psf->rw / 2.0 >= (double)ext_xmin)
-        left--;
-      right = start + count;
-      while (right < gcount &&
-             pos_x[gidx[right]] - psf->rw / 2.0 <= (double)ext_xmax)
-        right++;
+      for (xoi = 0; xoi < nxoff; xoi++) {
+        int xsel = pass == 0 ? xoi : (nxoff - 1 - xoi);
+        int nx = nx_arr[xsel * nyoff];
+        int xi_start = pass == 0 ? 0 : (nx - 1);
+        int xi_stop = pass == 0 ? nx : -1;
+        int xi_step = pass == 0 ? 1 : -1;
 
-      active_count = 0;
-      for (k = left; k < right && active_count < PSF_GROUP_EXACT_MAX; k++) {
-        int idx = gidx[k];
-        int64_t sxmin, sxmax, symin, symax;
-        psf_source_bbox(pos_x[idx], pos_y[idx], psf->rw, psf->rh, &sxmin, &sxmax,
-                        &symin, &symax);
-        if (!psf_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax, sxmin,
-                              sxmax, symin, symax))
-          continue;
-        active_idx[active_count++] = idx;
-      }
+        for (yoi = 0; yoi < nyoff; yoi++) {
+          int ysel = pass == 0 ? yoi : (nyoff - 1 - yoi);
+          int t = xsel * nyoff + ysel;
+          int64_t xbase = xbase_arr[t];
+          int64_t ybase = ybase_arr[t];
+          int nx = nx_arr[t];
+          int ny = ny_arr[t];
+          int yi_start = pass == 0 ? 0 : (ny - 1);
+          int yi_stop = pass == 0 ? ny : -1;
+          int yi_step = pass == 0 ? 1 : -1;
 
-      for (i = 0; i < active_count; i++) {
-        int idx = active_idx[i];
-        tmp_flux[idx] = work_flux[idx];
-        tmp_fluxerr[idx] = pfluxerr[idx];
-        tmp_flag[idx] = pflag[idx];
-      }
+          for (i = xi_start; i != xi_stop; i += xi_step) {
+            int yi;
+            int64_t core_xmin = xbase + (int64_t)i * core_span;
+            int64_t core_xmax = core_xmin + core_span;
 
-      status = psf_fit_flux_subset(im, psf, pos_x, pos_y, id, active_count,
-                                   active_idx, gidx, gcount, pos_x,
-                                   pos_y, work_flux, ws, tmp_flux, tmp_fluxerr,
-                                   tmp_flag);
-      if (status != RETURN_OK) goto cleanup;
+            for (yi = yi_start; yi != yi_stop; yi += yi_step) {
+              int left, right, core_count, active_count, changed_count, k;
+              int tile_idx = yi * nx + i;
+              int64_t core_ymin = ybase + (int64_t)yi * core_span;
+              int64_t core_ymax = core_ymin + core_span;
+              int64_t ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
+              int64_t ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
+              int64_t ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
+              int64_t ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
 
-      for (i = 0; i < active_count; i++) {
-        int idx = active_idx[i];
-        work_flux[idx] = tmp_flux[idx];
-      }
-      for (i = 0; i < count; i++) {
-        int idx = gidx[start + i];
-        pflux[idx] = tmp_flux[idx];
-        pfluxerr[idx] = tmp_fluxerr[idx];
-        pflag[idx] = tmp_flag[idx];
+              if (!dirty_cur[t][tile_idx]) continue;
+
+              left = psf_group_lower_bound(pos_x, gidx, gcount,
+                                           (double)ext_xmin - max_support_radius);
+              right = psf_group_upper_bound(pos_x, gidx, gcount,
+                                            (double)ext_xmax + max_support_radius);
+              core_count = 0;
+              active_count = 0;
+
+              for (k = left; k < right; k++) {
+                int idx = gidx[k];
+                int64_t sxmin, sxmax, symin, symax;
+                int in_core, in_ext;
+
+                psf_support_bbox(pos_x[idx], pos_y[idx], support_radius_arr[idx],
+                                 &sxmin, &sxmax, &symin, &symax);
+                in_core = psf_bbox_overlap(core_xmin, core_xmax, core_ymin,
+                                           core_ymax, sxmin, sxmax, symin, symax);
+                in_ext = psf_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
+                                          sxmin, sxmax, symin, symax);
+                if (in_core) {
+                  core_idx[core_count++] = idx;
+                  if ((double)(sxmin - core_xmin) > local_radius &&
+                      (double)(core_xmax - sxmax) > local_radius &&
+                      (double)(symin - core_ymin) > local_radius &&
+                      (double)(core_ymax - symax) > local_radius) {
+                    well_centered[idx] = 1;
+                  }
+                }
+                if (in_ext) {
+                  active_idx[active_count++] = idx;
+                }
+              }
+
+              if (core_count == 0 || active_count == 0) continue;
+
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                tmp_flux[idx] = work_flux[idx];
+                tmp_fluxerr[idx] = pfluxerr[idx];
+                tmp_flag[idx] = pflag[idx];
+              }
+
+              status = psf_fit_flux_subset(
+                  im, psf, pos_x, pos_y, id, active_count, active_idx, gidx, gcount,
+                  pos_x, pos_y, work_flux, ws, tmp_flux, tmp_fluxerr, tmp_flag);
+              if (status != RETURN_OK) goto cleanup;
+
+              changed_count = 0;
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                double old_flux = work_flux[idx];
+                double new_flux = tmp_flux[idx];
+                double tol = PSF_GROUP_CONV_ATOL +
+                             PSF_GROUP_CONV_RTOL *
+                                 (fabs(old_flux) > fabs(new_flux) ? fabs(old_flux)
+                                                                  : fabs(new_flux));
+                if (fabs(new_flux - old_flux) > tol) {
+                  converged = 0;
+                  core_idx[changed_count++] = idx;
+                }
+              }
+              for (k = 0; k < active_count; k++) {
+                int idx = active_idx[k];
+                work_flux[idx] = tmp_flux[idx];
+              }
+              for (k = 0; k < core_count; k++) {
+                int idx = core_idx[k];
+                pflux[idx] = tmp_flux[idx];
+                pfluxerr[idx] = tmp_fluxerr[idx];
+                pflag[idx] = tmp_flag[idx];
+              }
+              for (k = 0; k < changed_count; k++) {
+                int idx = core_idx[k];
+                int64_t sxmin, sxmax, symin, symax;
+                int64_t mark_xmin, mark_xmax, mark_ymin, mark_ymax;
+                psf_support_bbox(pos_x[idx], pos_y[idx], support_radius_arr[idx],
+                                 &sxmin, &sxmax, &symin, &symax);
+                mark_xmin = sxmin - (int64_t)(local_radius + 0.5);
+                mark_xmax = sxmax + (int64_t)(local_radius + 0.5);
+                mark_ymin = symin - (int64_t)(local_radius + 0.5);
+                mark_ymax = symax + (int64_t)(local_radius + 0.5);
+                psf_mark_tiles_for_bbox(dirty_next[t], nx, ny, xbase, ybase,
+                                        core_span, mark_xmin, mark_xmax,
+                                        mark_ymin, mark_ymax);
+              }
+            }
+          }
+        }
       }
     }
 
-    for (block = block_count - 1; block >= 0; block--) {
-      int start = block * PSF_GROUP_CORE;
-      int count = gcount - start;
-      int left, right, active_count, k;
-      int active_idx[PSF_GROUP_EXACT_MAX];
-      int64_t core_xmin, core_xmax, core_ymin, core_ymax;
-      int64_t ext_xmin, ext_xmax, ext_ymin, ext_ymax;
-      if (count > PSF_GROUP_CORE) count = PSF_GROUP_CORE;
+    if (converged) break;
+    for (i = 0; i < ntilings; i++) {
+      unsigned char *tmp = dirty_cur[i];
+      dirty_cur[i] = dirty_next[i];
+      dirty_next[i] = tmp;
+    }
+  }
 
-      core_xmin = (int64_t)im->w;
-      core_xmax = 0;
-      core_ymin = (int64_t)im->h;
-      core_ymax = 0;
-      for (i = 0; i < count; i++) {
-        int idx = gidx[start + i];
-        int64_t sxmin, sxmax, symin, symax;
-        psf_source_bbox(pos_x[idx], pos_y[idx], psf->rw, psf->rh, &sxmin, &sxmax,
-                        &symin, &symax);
-        if (sxmin < core_xmin) core_xmin = sxmin;
-        if (sxmax > core_xmax) core_xmax = sxmax;
-        if (symin < core_ymin) core_ymin = symin;
-        if (symax > core_ymax) core_ymax = symax;
-      }
+  if (!fit_positions) {
+    for (i = 0; i < gcount; i++) {
+      int idx = gidx[i];
+      int left, right, active_count, k;
+      int64_t core_xmin, core_xmax, core_ymin, core_ymax;
+      int64_t ext_xmin, ext_xmax;
+
+      if (well_centered[idx]) continue;
+
+      psf_support_bbox(pos_x[idx], pos_y[idx], support_radius_arr[idx],
+                       &core_xmin, &core_xmax, &core_ymin, &core_ymax);
       ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
       ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
-      ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
-      ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
-
-      left = start;
-      while (left > 0 &&
-             pos_x[gidx[left - 1]] + psf->rw / 2.0 >= (double)ext_xmin)
-        left--;
-      right = start + count;
-      while (right < gcount &&
-             pos_x[gidx[right]] - psf->rw / 2.0 <= (double)ext_xmax)
-        right++;
+      left = psf_group_lower_bound(pos_x, gidx, gcount,
+                                   (double)ext_xmin - max_support_radius);
+      right = psf_group_upper_bound(pos_x, gidx, gcount,
+                                    (double)ext_xmax + max_support_radius);
 
       active_count = 0;
-      for (k = left; k < right && active_count < PSF_GROUP_EXACT_MAX; k++) {
-        int idx = gidx[k];
+      for (k = left; k < right; k++) {
+        int jdx = gidx[k];
         int64_t sxmin, sxmax, symin, symax;
-        psf_source_bbox(pos_x[idx], pos_y[idx], psf->rw, psf->rh, &sxmin, &sxmax,
-                        &symin, &symax);
-        if (!psf_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax, sxmin,
+        psf_support_bbox(pos_x[jdx], pos_y[jdx], support_radius_arr[jdx],
+                         &sxmin, &sxmax, &symin, &symax);
+        if (!psf_bbox_overlap(core_xmin, core_xmax, core_ymin, core_ymax, sxmin,
                               sxmax, symin, symax))
           continue;
-        active_idx[active_count++] = idx;
+        active_idx[active_count++] = jdx;
       }
 
-      for (i = 0; i < active_count; i++) {
-        int idx = active_idx[i];
-        tmp_flux[idx] = work_flux[idx];
-        tmp_fluxerr[idx] = pfluxerr[idx];
-        tmp_flag[idx] = pflag[idx];
+      for (k = 0; k < active_count; k++) {
+        int jdx = active_idx[k];
+        tmp_flux[jdx] = work_flux[jdx];
+        tmp_fluxerr[jdx] = pfluxerr[jdx];
+        tmp_flag[jdx] = pflag[jdx];
       }
 
       status = psf_fit_flux_subset(im, psf, pos_x, pos_y, id, active_count,
-                                   active_idx, gidx, gcount, pos_x,
-                                   pos_y, work_flux, ws, tmp_flux, tmp_fluxerr,
+                                   active_idx, gidx, gcount, pos_x, pos_y,
+                                   work_flux, ws, tmp_flux, tmp_fluxerr,
                                    tmp_flag);
       if (status != RETURN_OK) goto cleanup;
 
-      for (i = 0; i < active_count; i++) {
-        int idx = active_idx[i];
-        work_flux[idx] = tmp_flux[idx];
-      }
-      for (i = 0; i < count; i++) {
-        int idx = gidx[start + i];
-        pflux[idx] = tmp_flux[idx];
-        pfluxerr[idx] = tmp_fluxerr[idx];
-        pflag[idx] = tmp_flag[idx];
-      }
+      work_flux[idx] = tmp_flux[idx];
+      pflux[idx] = tmp_flux[idx];
+      pfluxerr[idx] = tmp_fluxerr[idx];
+      pflag[idx] = tmp_flag[idx];
     }
   }
 
@@ -3708,6 +3925,13 @@ cleanup:
   free(work_flux);
   free(tmp_flux);
   free(tmp_fluxerr);
+  free(core_idx);
+  free(active_idx);
+  for (i = 0; i < ntilings; i++) {
+    free(dirty_cur[i]);
+    free(dirty_next[i]);
+  }
+  free(well_centered);
   free(tmp_flag);
   return status;
 }
@@ -3729,14 +3953,14 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
   int *members = NULL;
   psf_xorder_entry *xorder = NULL;
   psf_group_order_entry *group_order = NULL;
+  double *support_radius_arr = NULL;
   int i, j, g, ngroups;
   int has_multi;
-  double half_stamp, link_rsum, local_rsum, rsum2, dx, dy, dist2;
+  double max_support_radius, link_rsum, rsum2;
+  double dx, dy, dist2;
 
   if (n <= 0) return RETURN_OK;
   if (maxiter <= 0) maxiter = 20;
-
-  half_stamp = (double)(psf->rw + psf->rh) / 4.0;
 
   /* Initialize outputs */
   for (i = 0; i < n; i++) {
@@ -3761,37 +3985,54 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
   group_fill = (int *)malloc((size_t)n * sizeof(int));
   members = (int *)malloc((size_t)n * sizeof(int));
   xorder = (psf_xorder_entry *)malloc((size_t)n * sizeof(psf_xorder_entry));
+  support_radius_arr = (double *)malloc((size_t)n * sizeof(double));
 
   if (!parent || !rank_arr || !group_id || !root_map || !group_counts ||
-      !group_offsets || !group_fill || !members || !xorder) {
+      !group_offsets || !group_fill || !members || !xorder ||
+      !support_radius_arr) {
     status = MEMORY_ALLOC_ERROR;
     goto cleanup;
   }
 
   /* Initialize union-find */
+  max_support_radius = 0.0;
   for (i = 0; i < n; i++) {
+    double support_radius;
+    if (psf->fit_radius > 0.0) {
+      support_radius = psf->fit_radius;
+    } else {
+      int cix = (int)(x[i] + 0.5);
+      int ciy = (int)(y[i] + 0.5);
+      status = sep_psf_build(psf, x[i], y[i]);
+      if (status != RETURN_OK) goto cleanup;
+      status = sep_psf_resample(psf, x[i] - cix, y[i] - ciy);
+      if (status != RETURN_OK) goto cleanup;
+      psf_normalize_resampled(psf);
+      support_radius = psf_current_effective_radius(psf);
+    }
+    support_radius_arr[i] = support_radius;
+    if (support_radius > max_support_radius) max_support_radius = support_radius;
     parent[i] = i;
     xorder[i].x = x[i];
     xorder[i].idx = i;
   }
   qsort(xorder, (size_t)n, sizeof(psf_xorder_entry), psf_xorder_cmp);
 
-  /* Build groups based on stamp overlap.
-   * Sweep in x-order and only test pairs inside +/-rsum x-window. */
-  local_rsum = group_factor * (half_stamp + half_stamp);
-  link_rsum = local_rsum;
-  if (link_rsum > half_stamp + half_stamp) link_rsum = half_stamp + half_stamp;
-  rsum2 = link_rsum * link_rsum;
-  if (link_rsum > 0.0) {
+  /* Build groups based on direct fit-support overlap.
+   * Sweep in x-order and only test pairs inside the maximum possible x-window. */
+  if (max_support_radius > 0.0) {
     for (i = 0; i < n; i++) {
       int ii = xorder[i].idx;
       double xi = xorder[i].x;
+      double link_limit = support_radius_arr[ii] + max_support_radius;
       for (j = i + 1; j < n; j++) {
         int jj = xorder[j].idx;
         dx = xorder[j].x - xi;
-        if (dx > link_rsum) break;
+        if (dx > link_limit) break;
+        link_rsum = support_radius_arr[ii] + support_radius_arr[jj];
         dy = y[ii] - y[jj];
         if (dy > link_rsum || dy < -link_rsum) continue;
+        rsum2 = link_rsum * link_rsum;
         dist2 = dx * dx + dy * dy;
         if (dist2 <= rsum2) {
           psf_uf_union(parent, rank_arr, ii, jj);
@@ -3913,7 +4154,8 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
                                             pflag);
             } else {
               gstatus = psf_fit_group_localized(
-                  im, work_psf, x, y, id, local_rsum, inflag, maxiter,
+                  im, work_psf, x, y, id, support_radius_arr, group_factor,
+                  inflag, maxiter,
                   0, gcount, gidx,
                   &group_ws, pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr,
                   pniter, pchi2, pflag);
@@ -3925,7 +4167,8 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
                                      pxerr, pyerr, pniter, pchi2, pflag);
           } else {
             gstatus = psf_fit_group_localized(
-                im, work_psf, x, y, id, local_rsum, inflag, maxiter,
+                im, work_psf, x, y, id, support_radius_arr, group_factor,
+                inflag, maxiter,
                 fit_positions, gcount, gidx,
                 &group_ws, pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr, pniter,
                 pchi2, pflag);
@@ -3975,7 +4218,8 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
                                      &group_ws, pflux, pfluxerr, pflag);
       } else {
         status = psf_fit_group_localized(
-            im, psf, x, y, id, local_rsum, inflag, maxiter,
+            im, psf, x, y, id, support_radius_arr, group_factor, inflag,
+            maxiter,
             0, gcount, gidx,
             &group_ws, pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr,
             pniter, pchi2, pflag);
@@ -3987,7 +4231,7 @@ int sep_psf_fit_multi(const sep_image *im, sep_psf *psf, const double *x,
                               pchi2, pflag);
     } else {
       status = psf_fit_group_localized(
-          im, psf, x, y, id, local_rsum, inflag, maxiter,
+          im, psf, x, y, id, support_radius_arr, group_factor, inflag, maxiter,
           fit_positions, gcount, gidx,
           &group_ws, pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr, pniter,
           pchi2, pflag);
@@ -4011,5 +4255,6 @@ cleanup:
   free(group_offsets);
   free(group_fill);
   free(members);
+  free(support_radius_arr);
   return status;
 }

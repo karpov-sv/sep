@@ -930,6 +930,154 @@ def test_sum_circle_optimal_grouped_large_component_variable_radius():
     assert err_grp.mean() < err.mean()
 
 
+def test_sum_circle_optimal_grouped_respects_aperture_overlap():
+    """Grouping should be driven by aperture overlap, not full PSF stamp size."""
+    shape = (240, 240)
+    fwhm = 4.4
+    r = 4.4
+
+    # Spacing exceeds 2*r, so optimal-aperture groups should remain isolated.
+    xs = np.arange(30.0, 210.1, 12.0)
+    ys = np.arange(30.0, 210.1, 12.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel()
+    y0 = y0.ravel()
+    true_flux = np.full(x0.shape, 1000.0, dtype=float)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux, _, _ = sep.sum_circle_optimal(data, x0, y0, r, fwhm, subpix=0)
+    flux_grp_ref, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, group_radius_factor=1.000001, subpix=0
+    )
+    flux_grp, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+
+    assert np.all(np.isfinite(flux_grp))
+    assert_allclose(flux_grp, flux_grp_ref)
+    assert_allclose(flux_grp, flux)
+
+
+def test_sum_circle_optimal_grouped_recovers_blended_gaussians():
+    """Grouped optimal should deblend close Gaussian sources without biasing much."""
+    shape = (64, 64)
+    x0 = np.array([29.2, 33.0, 35.1])
+    y0 = np.array([31.1, 31.8, 34.6])
+    fwhm = np.full(3, 3.6)
+    r = np.full(3, 4.5)
+    true_flux = np.array([800.0, 500.0, 300.0])
+
+    data = _gaussian_scene(shape, x0, y0, fwhm[0], true_flux)
+    flux_grp, _, flag = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, group_radius_factor=1.0, subpix=1
+    )
+
+    assert np.all(flag == 0)
+    assert_allclose(flux_grp, true_flux, rtol=0.01, atol=0.0)
+
+
+def test_sum_circle_optimal_group_halo_factor_matches_old_semantics():
+    shape = (220, 220)
+    rng = np.random.default_rng(8)
+    nsrc = 80
+    fwhm = 5.0
+    r = 2.0 * fwhm
+    x0 = rng.uniform(60.0, 160.0, nsrc)
+    y0 = rng.uniform(60.0, 160.0, nsrc)
+    true_flux = rng.uniform(200.0, 1200.0, nsrc)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux_old, fluxerr_old, flag_old = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, group_radius_factor=1.2, subpix=0
+    )
+    flux_new, fluxerr_new, flag_new = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm,
+        grouped=True,
+        group_radius_factor=1.0,
+        group_halo_factor=1.2,
+        subpix=0,
+    )
+
+    assert np.all(np.isfinite(flux_new))
+    assert np.all(np.isfinite(fluxerr_new))
+    assert np.all(flag_new == flag_old)
+    assert_allclose(flux_new, flux_old, rtol=5e-3, atol=5e-3)
+    assert_allclose(fluxerr_new, fluxerr_old, rtol=5e-3, atol=5e-3)
+
+
+def test_sum_circle_optimal_group_halo_factor_clamps_to_connectivity():
+    """Localized grouped optimal fits should not use halo smaller than support."""
+    shape = (240, 240)
+    fwhm = 4.0
+    r = 4.0
+
+    xs = np.arange(40.0, 200.1, 7.0)
+    ys = np.arange(40.0, 200.1, 7.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel()
+    y0 = y0.ravel()
+    true_flux = np.full(x0.shape, 1000.0, dtype=float)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux_1, fluxerr_1, flag_1 = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm,
+        grouped=True,
+        group_radius_factor=1.0,
+        group_halo_factor=1.0,
+        subpix=0,
+    )
+    flux_low, fluxerr_low, flag_low = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm,
+        grouped=True,
+        group_radius_factor=1.0,
+        group_halo_factor=0.5,
+        subpix=0,
+    )
+
+    assert np.all(np.isfinite(flux_low))
+    assert np.all(flag_low == flag_1)
+    assert_allclose(flux_low, flux_1)
+    assert_allclose(fluxerr_low, fluxerr_1)
+
+
+def test_sum_circle_optimal_group_halo_factor_order_invariant():
+    """Localized grouped optimal fits should not depend on input ordering."""
+    shape = (120, 120)
+    fwhm = 4.0
+    r = 4.0
+
+    xs = np.arange(30.0, 86.1, 7.0)
+    ys = np.arange(30.0, 86.1, 7.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel()
+    y0 = y0.ravel()
+    true_flux = np.full(x0.shape, 1000.0, dtype=float)
+
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    flux_a, err_a, flag_a = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm,
+        grouped=True,
+        group_radius_factor=1.0,
+        group_halo_factor=10.0,
+        subpix=0,
+    )
+    flux_b, err_b, flag_b = sep.sum_circle_optimal(
+        data, x0[::-1], y0[::-1], r, fwhm,
+        grouped=True,
+        group_radius_factor=1.0,
+        group_halo_factor=10.0,
+        subpix=0,
+    )
+
+    assert_allclose(flux_a, flux_b[::-1])
+    assert_allclose(err_a, err_b[::-1])
+    assert np.all(flag_a == flag_b[::-1])
+
+
 def _sigma_clip_mean(values, sigma=3.0, maxiters=5):
     mask = np.ones(values.shape, dtype=bool)
     for _ in range(maxiters):
@@ -1676,6 +1824,169 @@ def test_psf_grouped_fit_radius_chi2_matches_masked_residual():
     assert np.all(flag == 0)
     assert np.all(niter >= 1)
     assert_allclose(chi2, manual, rtol=1.0e-6, atol=1.0e-6)
+
+
+def test_psf_grouped_fit_radius_limits_connectivity():
+    """Grouped PSF fitting should use fit support, not full stamp overlap."""
+    fwhm = 4.4
+    fit_radius = 4.4
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    shape = (240, 240)
+    xs = np.arange(30.0, 210.1, 12.0)
+    ys = np.arange(30.0, 210.1, 12.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel().astype(np.float64)
+    y0 = y0.ravel().astype(np.float64)
+    flux_true = np.full(x0.shape, 1000.0, dtype=np.float64)
+
+    data = np.zeros(shape, dtype=np.float32)
+    sep.model_psf(data, x0, y0, flux_true, psf)
+
+    flux_u, err_u, xf_u, yf_u, flag_u, chi2_u, niter_u = sep.psf_fit(
+        data, x0, y0, psf, fit_positions=False, fit_radius=fit_radius
+    )
+    flux_g, err_g, xf_g, yf_g, flag_g, chi2_g, niter_g = sep.psf_fit(
+        data, x0, y0, psf, grouped=True, fit_positions=False, fit_radius=fit_radius
+    )
+    flux_h, err_h, xf_h, yf_h, flag_h, chi2_h, niter_h = sep.psf_fit(
+        data, x0, y0, psf,
+        grouped=True, fit_positions=False, fit_radius=fit_radius,
+        group_factor=5.0,
+    )
+
+    assert_allclose(flux_g, flux_u)
+    assert_allclose(err_g, err_u)
+    assert_allclose(xf_g, xf_u)
+    assert_allclose(yf_g, yf_u)
+    assert_allclose(flux_h, flux_u)
+    assert_allclose(err_h, err_u)
+    assert_allclose(xf_h, xf_u)
+    assert_allclose(yf_h, yf_u)
+    assert np.all(flag_g == flag_u)
+    assert np.all(flag_h == flag_u)
+    assert np.all(np.isnan(chi2_g))
+    assert np.all(np.isnan(chi2_h))
+    assert np.all(niter_g == 0)
+    assert np.all(niter_h == 0)
+
+
+def test_psf_grouped_full_stamp_uses_effective_support():
+    """Grouped full-stamp PSF fitting should not group by raw stamp extent."""
+    fwhm = 4.4
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    shape = (240, 240)
+    xs = np.arange(30.0, 210.1, 12.0)
+    ys = np.arange(30.0, 210.1, 12.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel().astype(np.float64)
+    y0 = y0.ravel().astype(np.float64)
+    flux_true = np.full(x0.shape, 1000.0, dtype=np.float64)
+
+    data = np.zeros(shape, dtype=np.float32)
+    sep.model_psf(data, x0, y0, flux_true, psf)
+
+    flux_u, err_u, xf_u, yf_u, flag_u, chi2_u, niter_u = sep.psf_fit(
+        data, x0, y0, psf, fit_positions=False
+    )
+    flux_g, err_g, xf_g, yf_g, flag_g, chi2_g, niter_g = sep.psf_fit(
+        data, x0, y0, psf, grouped=True, fit_positions=False
+    )
+    flux_h, err_h, xf_h, yf_h, flag_h, chi2_h, niter_h = sep.psf_fit(
+        data, x0, y0, psf, grouped=True, fit_positions=False, group_factor=5.0
+    )
+
+    assert_allclose(flux_g, flux_u)
+    assert_allclose(err_g, err_u)
+    assert_allclose(xf_g, xf_u)
+    assert_allclose(yf_g, yf_u)
+    assert_allclose(flux_h, flux_u)
+    assert_allclose(err_h, err_u)
+    assert_allclose(xf_h, xf_u)
+    assert_allclose(yf_h, yf_u)
+    assert np.all(flag_g == flag_u)
+    assert np.all(flag_h == flag_u)
+    assert np.all(np.isnan(chi2_g))
+    assert np.all(np.isnan(chi2_h))
+    assert np.all(niter_g == 0)
+    assert np.all(niter_h == 0)
+
+
+def test_psf_grouped_group_factor_clamps_to_support():
+    """Localized grouped PSF fits should keep halo at least as large as support."""
+    fwhm = 4.0
+    fit_radius = 4.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    shape = (240, 240)
+    xs = np.arange(40.0, 200.1, 7.0)
+    ys = np.arange(40.0, 200.1, 7.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel().astype(np.float64)
+    y0 = y0.ravel().astype(np.float64)
+    flux_true = np.full(x0.shape, 1000.0, dtype=np.float64)
+
+    data = np.zeros(shape, dtype=np.float32)
+    sep.model_psf(data, x0, y0, flux_true, psf)
+
+    flux_1, err_1, xf_1, yf_1, flag_1, chi2_1, niter_1 = sep.psf_fit(
+        data, x0, y0, psf,
+        grouped=True, fit_positions=False, fit_radius=fit_radius,
+        group_factor=1.0,
+    )
+    flux_low, err_low, xf_low, yf_low, flag_low, chi2_low, niter_low = sep.psf_fit(
+        data, x0, y0, psf,
+        grouped=True, fit_positions=False, fit_radius=fit_radius,
+        group_factor=0.5,
+    )
+
+    assert_allclose(flux_low, flux_1)
+    assert_allclose(err_low, err_1)
+    assert_allclose(xf_low, xf_1)
+    assert_allclose(yf_low, yf_1)
+    assert np.all(flag_low == flag_1)
+    assert np.all(np.isnan(chi2_low))
+    assert np.all(np.isnan(chi2_1))
+    assert np.all(niter_low == niter_1)
+
+
+def test_psf_grouped_group_factor_order_invariant():
+    """Localized grouped PSF fits should not depend on input ordering."""
+    fwhm = 4.0
+    fit_radius = 4.0
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+
+    shape = (120, 120)
+    xs = np.arange(30.0, 86.1, 7.0)
+    ys = np.arange(30.0, 86.1, 7.0)
+    x0, y0 = np.meshgrid(xs, ys)
+    x0 = x0.ravel().astype(np.float64)
+    y0 = y0.ravel().astype(np.float64)
+    flux_true = np.full(x0.shape, 1000.0, dtype=np.float64)
+
+    data = np.zeros(shape, dtype=np.float32)
+    sep.model_psf(data, x0, y0, flux_true, psf)
+
+    flux_a, err_a, xf_a, yf_a, flag_a, chi2_a, niter_a = sep.psf_fit(
+        data, x0, y0, psf,
+        grouped=True, fit_positions=False, fit_radius=fit_radius,
+        group_factor=10.0,
+    )
+    flux_b, err_b, xf_b, yf_b, flag_b, chi2_b, niter_b = sep.psf_fit(
+        data, x0[::-1], y0[::-1], psf,
+        grouped=True, fit_positions=False, fit_radius=fit_radius,
+        group_factor=10.0,
+    )
+
+    assert_allclose(flux_a, flux_b[::-1])
+    assert_allclose(err_a, err_b[::-1])
+    assert_allclose(xf_a, xf_b[::-1])
+    assert_allclose(yf_a, yf_b[::-1])
+    assert np.all(flag_a == flag_b[::-1])
+    assert np.all(np.isnan(chi2_a))
+    assert np.all(np.isnan(chi2_b))
+    assert np.all(niter_a == niter_b[::-1])
 
 
 def test_psf_position_varying():
