@@ -30,6 +30,8 @@
 #include "sep.h"
 #include "sepcore.h"
 
+#define MTHRESH_STACKSIZE 64
+
 static int fit_fwhm_core(
     const objstruct * obj,
     pliststruct * pixel,
@@ -95,11 +97,12 @@ int analysemthresh(int objnb, objliststruct * objlist, int minarea, PIXTYPE thre
   pliststruct * pixel = objlist->plist;
   pliststruct * pixt;
   PIXTYPE tpix;
-  float *heap, *heapt, *heapj, *heapk, swap;
+  float stackheap[MTHRESH_STACKSIZE];
+  float *heap, *heap_alloc, *heapt, *heapj, *heapk, swap;
   int j, k, h, status;
 
   status = RETURN_OK;
-  heap = heapt = heapj = heapk = NULL;
+  heap = heap_alloc = heapt = heapj = heapk = NULL;
   h = minarea;
 
   if (obj->fdnpix < minarea) {
@@ -107,7 +110,12 @@ int analysemthresh(int objnb, objliststruct * objlist, int minarea, PIXTYPE thre
     return status;
   }
 
-  QCALLOC(heap, float, minarea, status);
+  if (minarea <= MTHRESH_STACKSIZE) {
+    heap = stackheap;
+  } else {
+    QCALLOC(heap_alloc, float, minarea, status);
+    heap = heap_alloc;
+  }
   heapt = heap;
 
   /*-- Find the minareath pixel in decreasing intensity for CLEANing */
@@ -145,7 +153,7 @@ int analysemthresh(int objnb, objliststruct * objlist, int minarea, PIXTYPE thre
   obj->mthresh = *heap;
 
 exit:
-  free(heap);
+  free(heap_alloc);
   return status;
 }
 

@@ -310,6 +310,30 @@ SEP_API int sep_extract(
     sep_catalog ** catalog
 ); /* OUTPUT catalog                    */
 
+/* sep_extract_with_pixels()
+ *
+ * Like sep_extract(), but allows callers to skip constructing catalog->pix and
+ * catalog->objectspix when per-object pixel indices are not needed.
+ */
+SEP_API int sep_extract_with_pixels(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
+    int clean_flag,
+    double clean_param,
+    int include_pixels,
+    sep_catalog ** catalog
+);
+
 
 /* set and get the size of the pixel stack used in extract() */
 SEP_API void sep_set_extract_pixstack(size_t val);

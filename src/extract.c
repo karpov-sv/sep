@@ -377,6 +377,44 @@ int sep_extract(
     double clean_param,
     sep_catalog ** catalog
 ) {
+  return sep_extract_with_pixels(
+      image,
+      thresh,
+      thresh_type,
+      minarea,
+      conv,
+      convw,
+      convh,
+      filter_type,
+      deblend_nthresh,
+      deblend_cont,
+      deblend_fwhm,
+      deblend_method,
+      clean_flag,
+      clean_param,
+      1,
+      catalog
+  );
+}
+
+int sep_extract_with_pixels(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
+    int clean_flag,
+    double clean_param,
+    int include_pixels,
+    sep_catalog ** catalog
+) {
   arraybuffer dbuf, nbuf, mbuf, sbuf;
   infostruct curpixinfo, initinfo, freeinfo;
   objliststruct objlist;
@@ -979,7 +1017,7 @@ int sep_extract(
   }
   /* convert to output catalog */
   QCALLOC(cat, sep_catalog, 1, status);
-  status = convert_to_catalog(finalobjlist, survives, cat, w, 1);
+  status = convert_to_catalog(finalobjlist, survives, cat, w, include_pixels);
   if (status != RETURN_OK) {
     goto exit;
   }
@@ -1109,6 +1147,15 @@ int sortit(
   obj.thresh = objlist->thresh;
 
   preanalyse(0, objlist);
+
+  if (deblend_mincont >= 1.0
+      || (deblend_method == SEP_DEBLEND_THRESH && deblend_nthresh <= 1)
+      || obj.fdnpix < 2 * minarea)
+  {
+    analyse(0, objlist, 1, gain);
+    status = addobjdeep(0, objlist, finalobjlist);
+    goto exit;
+  }
 
   status = deblend(
       objlist,
@@ -1584,8 +1631,6 @@ int convert_to_catalog(
   QMALLOC(cat->ycpeak, int64_t, nobj, status);
   QMALLOC(cat->xpeak, int64_t, nobj, status);
   QMALLOC(cat->ypeak, int64_t, nobj, status);
-  QMALLOC(cat->cflux, float, nobj, status);
-  QMALLOC(cat->flux, float, nobj, status);
   QMALLOC(cat->flag, short, nobj, status);
 
   /* fill output arrays */

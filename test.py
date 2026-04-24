@@ -1350,6 +1350,32 @@ def test_set_sub_object_limit():
     sep.set_sub_object_limit(old)
 
 
+def test_extract_deblend_disabled_skips_deblend_tree():
+    """
+    Disabling deblending should not build the threshold deblend tree.
+    """
+
+    old = sep.get_sub_object_limit()
+    data = np.zeros((7, 7), dtype=np.float32)
+    data[2:5, 2:5] = 10.0
+
+    try:
+        sep.set_sub_object_limit(1)
+        objects = sep.extract(
+            data,
+            1.0,
+            minarea=1,
+            filter_kernel=None,
+            deblend_cont=1.0,
+            deblend_nthresh=32,
+            clean=False,
+        )
+    finally:
+        sep.set_sub_object_limit(old)
+
+    assert len(objects) == 1
+
+
 def test_extract_watershed_centroids_follow_segment_moments():
     """
     Watershed-deblended centroids should match first moments of the assigned

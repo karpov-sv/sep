@@ -158,6 +158,22 @@ cdef extern from "sep.h":
                     int clean_flag,
                     double clean_param,
                     sep_catalog **catalog)
+    int sep_extract_with_pixels(const sep_image *image,
+                                float thresh,
+                                int thresh_type,
+                                int minarea,
+                                float *conv,
+                                np.int64_t convw,
+                                np.int64_t convh,
+                                int filter_type,
+                                int deblend_nthresh,
+                                double deblend_cont,
+                                double deblend_fwhm,
+                                int deblend_method,
+                                int clean_flag,
+                                double clean_param,
+                                int include_pixels,
+                                sep_catalog **catalog)
 
     void sep_catalog_free(sep_catalog *catalog)
 
@@ -838,7 +854,7 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         ``segmentation_map = True | ~numpy.ndarray``.
     """
 
-    cdef int kernelw, kernelh, status, i, j
+    cdef int kernelw, kernelh, status, i, j, include_pixels
     cdef int filter_typecode, thresh_type
     cdef sep_catalog *catalog = NULL
     cdef np.ndarray[Object] result
@@ -916,13 +932,14 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     else:
         thresh_type = SEP_THRESH_REL
 
-    status = sep_extract(&im,
-                         thresh, thresh_type, minarea,
-                         kernelptr, kernelw, kernelh, filter_typecode,
-                         deblend_nthresh, deblend_cont, deblend_fwhm,
-                         deblend_methodcode,
-                         clean, clean_param,
-                         &catalog)
+    include_pixels = 1 if (type(segmentation_map) is np.ndarray or segmentation_map) else 0
+    status = sep_extract_with_pixels(&im,
+                                     thresh, thresh_type, minarea,
+                                     kernelptr, kernelw, kernelh, filter_typecode,
+                                     deblend_nthresh, deblend_cont, deblend_fwhm,
+                                     deblend_methodcode,
+                                     clean, clean_param, include_pixels,
+                                     &catalog)
     _assert_ok(status)
 
     # Allocate result record array and fill it
