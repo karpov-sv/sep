@@ -275,6 +275,31 @@ static void cholesky_solve(const double *L, const double *b, double *x, int n,
   }
 }
 
+static void cholesky_inverse_diagonal_inplace(double *L, int n, double *work,
+                                              double *diag) {
+  int i, j, k;
+
+  for (i = 0; i < n; i++) {
+    for (k = 0; k <= i; k++) work[k] = L[i * n + k];
+
+    for (j = 0; j < i; j++) {
+      double sum = 0.0;
+      for (k = j; k < i; k++) sum += work[k] * L[k * n + j];
+      L[i * n + j] = -sum / work[i];
+    }
+    L[i * n + i] = 1.0 / work[i];
+  }
+
+  for (i = 0; i < n; i++) {
+    double sum = 0.0;
+    for (k = i; k < n; k++) {
+      double v = L[k * n + i];
+      sum += v * v;
+    }
+    diag[i] = sum;
+  }
+}
+
 static int uf_find(int *parent, int i) {
   while (parent[i] != i) {
     parent[i] = parent[parent[i]];
@@ -863,9 +888,16 @@ static int optimal_group_solve_compact(
   for (i = 0; i < gcount; i++) {
     int ia = col_starts[i];
     int ib = col_starts[i + 1];
+    int idx = gidx[i];
     for (j = ia; j < ib; j++) b[i] += col_vals[j] * gdata[pix_idx[j]];
     M[i * gcount + i] = optimal_sparse_dot(pix_idx, col_vals, ia, ib, ia, ib);
     for (j = 0; j < i; j++) {
+      int jdx = gidx[j];
+      if (!optimal_bbox_overlap(sxmin_arr[idx], sxmax_arr[idx], symin_arr[idx],
+                                symax_arr[idx], sxmin_arr[jdx], sxmax_arr[jdx],
+                                symin_arr[jdx], symax_arr[jdx])) {
+        continue;
+      }
       double dot = optimal_sparse_dot(pix_idx, col_vals, ia, ib, col_starts[j],
                                       col_starts[j + 1]);
       M[i * gcount + j] = dot;
@@ -894,12 +926,10 @@ static int optimal_group_solve_compact(
     sum[idx] = sol[i];
   }
 
+  cholesky_inverse_diagonal_inplace(M, gcount, work, b);
   for (i = 0; i < gcount; i++) {
     int idx = gidx[i];
-    memset(work, 0, (size_t)gcount * sizeof(double));
-    work[i] = 1.0;
-    cholesky_solve(M, work, sol, gcount, b);
-    var = sol[i];
+    var = b[i];
     if (var < 0.0) var = 0.0;
     if (im->gain > 0.0 && sum[idx] > 0.0) var += sum[idx] / im->gain;
     sumerr[idx] = sqrt(var);
@@ -1169,12 +1199,10 @@ static int optimal_group_solve_exact(
     sum[idx] = sol[i];
   }
 
+  cholesky_inverse_diagonal_inplace(M, gcount, work, b);
   for (i = 0; i < gcount; i++) {
     int idx = gidx[i];
-    memset(work, 0, (size_t)gcount * sizeof(double));
-    work[i] = 1.0;
-    cholesky_solve(M, work, sol, gcount, b);
-    var = sol[i];
+    var = b[i];
     if (var < 0.0) var = 0.0;
     if (im->gain > 0.0 && sum[idx] > 0.0) var += sum[idx] / im->gain;
     sumerr[idx] = sqrt(var);
