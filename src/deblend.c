@@ -204,8 +204,15 @@ int deblend(
           }
 
           for (j = h = 0; j < debobjlist.nobj; j++) {
+            objstruct *child = debobjlist.obj + j;
+            double excess_flux = child->fdflux - debobjlist.thresh * child->fdnpix;
+
+            if (excess_flux <= value0) {
+              continue;
+            }
+
             if (belong(j, &debobjlist, i, &objlist[k - 1])) {
-              debobjlist.obj[j].thresh = debobjlist.thresh;
+              child->thresh = debobjlist.thresh;
               if ((status = addobjdeep(j, &debobjlist, &objlist[k])) != RETURN_OK) {
                 goto exit;
               }

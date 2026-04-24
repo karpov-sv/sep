@@ -1376,6 +1376,32 @@ def test_extract_deblend_disabled_skips_deblend_tree():
     assert len(objects) == 1
 
 
+def test_extract_deblend_prunes_low_contrast_branches():
+    """
+    Low-contrast branches should not consume deblend tree capacity.
+    """
+
+    old = sep.get_sub_object_limit()
+    data = np.ones((9, 41), dtype=np.float32) * 2.0
+    data[4, 2::4] = 20.0
+
+    try:
+        sep.set_sub_object_limit(4)
+        objects = sep.extract(
+            data,
+            1.0,
+            minarea=1,
+            filter_kernel=None,
+            deblend_cont=0.9,
+            deblend_nthresh=32,
+            clean=False,
+        )
+    finally:
+        sep.set_sub_object_limit(old)
+
+    assert len(objects) == 1
+
+
 def test_extract_watershed_centroids_follow_segment_moments():
     """
     Watershed-deblended centroids should match first moments of the assigned
