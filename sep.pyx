@@ -3629,16 +3629,15 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
                    var=None, err=None, gain=None, np.ndarray mask=None,
                    double maskthresh=0.0, fit_snr=5.0,
                    bint fit_positions=True, bint keep_flagged=False,
-                   int maxiter=20, bint grouped=False,
-                   double group_factor=2.0, min_qf=None,
-                   max_rchi2=None, min_fracflux=None):
+                   int maxiter=20, double group_factor=2.0,
+                   min_qf=None, max_rchi2=None, min_fracflux=None):
     if len(peaks) == 0:
         return _empty_psf_peak_fit_catalog()
 
     flux, fluxerr, xfit, yfit, flag, chi2, niter = psf_fit(
         data, peaks['x'], peaks['y'], psf, var=var, err=err, gain=gain,
         mask=mask, maskthresh=maskthresh, maxiter=maxiter,
-        fit_positions=fit_positions, grouped=grouped,
+        fit_positions=fit_positions, grouped=True,
         group_factor=group_factor,
     )
     fit_snr_values = flux / np.maximum(fluxerr, 1.0e-30)
@@ -3697,6 +3696,288 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
     return result
 
 
+def _psf_peak_local_sky(np.ndarray data not None, var=None,
+                        np.ndarray mask=None, double maskthresh=0.0,
+                        int box_size=20):
+    if box_size <= 0:
+        raise ValueError("peak_local_sky_box must be positive")
+
+    image = np.asarray(data, dtype=np.float64)
+    try:
+        from scipy.ndimage import gaussian_filter, map_coordinates
+    except ImportError:
+        bkg = Background(
+            image, mask=mask, maskthresh=maskthresh,
+            bw=box_size, bh=box_size, fw=1, fh=1
+        )
+        return bkg.back(dtype=np.float64)
+
+    nbin_y = int(np.ceil(image.shape[0] / float(box_size)))
+    nbin_x = int(np.ceil(image.shape[1] / float(box_size)))
+    yg = np.linspace(0, image.shape[0], nbin_y + 1).astype(np.int64)
+    xg = np.linspace(0, image.shape[1], nbin_x + 1).astype(np.int64)
+    val = np.zeros((nbin_y, nbin_x), dtype=np.float64)
+    used = np.zeros((nbin_y, nbin_x), dtype=np.float64)
+
+    if var is not None and np.ndim(var) != 0:
+        weight_good = np.asarray(var) > 0.0
+    else:
+        weight_good = np.ones(image.shape, dtype=bool)
+    if mask is not None:
+        weight_good &= np.asarray(mask) <= maskthresh
+    weight_good &= np.isfinite(image)
+
+    for iy in range(nbin_y):
+        for ix in range(nbin_x):
+            ys = slice(yg[iy], yg[iy + 1])
+            xs = slice(xg[ix], xg[ix + 1])
+            good = weight_good[ys, xs]
+            used[iy, ix] = np.sum(good)
+            if used[iy, ix] > 0:
+                val[iy, ix] = np.median(image[ys, xs][good])
+
+    val[used < 20] = 0.0
+    used[used < 20] = 0.0
+    count = 0
+    while np.any(used == 0.0):
+        sig = 0.4
+        valc = gaussian_filter(val * (used > 0.0), sig, mode="constant")
+        weightc = gaussian_filter((used != 0.0).astype(np.float64), sig,
+                                  mode="constant")
+        missing = (used == 0.0) & (weightc > 1.0e-10)
+        val[missing] = valc[missing] / weightc[missing]
+        used[missing] = 1.0
+        count += 1
+        if count > 100:
+            missing = used == 0.0
+            if np.any(weight_good):
+                val[missing] = np.median(image[weight_good])
+            used[missing] = 1.0
+            break
+
+    y = np.arange(image.shape[0])
+    x = np.arange(image.shape[1])
+    yc = (yg[:-1] + yg[1:]) / 2.0
+    xc = (xg[:-1] + xg[1:]) / 2.0
+    yp = np.interp(y, yc, np.arange(len(yc), dtype=np.float64))
+    xp = np.interp(x, xc, np.arange(len(xc), dtype=np.float64))
+    ypa = yp.reshape(-1, 1) * np.ones(len(xp)).reshape(1, -1)
+    xpa = xp.reshape(1, -1) * np.ones(len(yp)).reshape(-1, 1)
+    coord = [ypa.ravel(), xpa.ravel()]
+    sky = map_coordinates(val, coord, mode="nearest", order=1)
+    return sky.reshape(image.shape)
+
+
+def _peaks_far_from_sources(peaks, sources, min_distance):
+    if len(peaks) == 0 or len(sources) == 0 or min_distance is None:
+        return np.ones(len(peaks), dtype=bool)
+    if min_distance <= 0.0:
+        return np.ones(len(peaks), dtype=bool)
+
+    cell = max(float(min_distance), 1.0)
+    radius2 = float(min_distance) * float(min_distance)
+    grid = {}
+    for i in range(len(sources)):
+        gx = int(np.floor(sources['x'][i] / cell))
+        gy = int(np.floor(sources['y'][i] / cell))
+        grid.setdefault((gx, gy), []).append(i)
+
+    keep = np.ones(len(peaks), dtype=bool)
+    for i in range(len(peaks)):
+        gx = int(np.floor(peaks['x'][i] / cell))
+        gy = int(np.floor(peaks['y'][i] / cell))
+        for ox in range(-1, 2):
+            for oy in range(-1, 2):
+                for j in grid.get((gx + ox, gy + oy), []):
+                    dx = peaks['x'][i] - sources['x'][j]
+                    dy = peaks['y'][i] - sources['y'][j]
+                    if dx * dx + dy * dy < radius2:
+                        keep[i] = False
+                        break
+                if not keep[i]:
+                    break
+            if not keep[i]:
+                break
+
+    return keep
+
+
+def _subtract_psf_peak_catalog(residual, catalog, PSF psf not None):
+    if len(catalog) == 0:
+        return
+    model = np.zeros(residual.shape, dtype=np.float64)
+    model_psf(model, catalog['x'], catalog['y'], catalog['flux'], psf)
+    residual -= model
+
+
+def _psf_peak_model(shape, catalog, PSF psf not None):
+    model = np.zeros(shape, dtype=np.float64)
+    if len(catalog) > 0:
+        model_psf(model, catalog['x'], catalog['y'], catalog['flux'], psf)
+    return model
+
+
+def _psf_peak_candidates_from_fit_catalog(catalog):
+    peaks = np.empty(len(catalog),
+                     dtype=np.dtype([('x', np.float64),
+                                     ('y', np.float64),
+                                     ('snr', np.float64),
+                                     ('xpeak', np.int64),
+                                     ('ypeak', np.int64)]))
+    peaks['x'] = catalog['x']
+    peaks['y'] = catalog['y']
+    peaks['snr'] = catalog['peak_snr']
+    peaks['xpeak'] = catalog['xpeak']
+    peaks['ypeak'] = catalog['ypeak']
+    return peaks
+
+
+def _rebuild_psf_peak_residual(np.ndarray data not None, catalog,
+                               PSF psf not None):
+    residual = np.ascontiguousarray(data, dtype=np.float64).copy()
+    _subtract_psf_peak_catalog(residual, catalog, psf)
+    return residual
+
+
+def _refit_psf_peaks_with_model_sky(np.ndarray data not None, catalog,
+                                    PSF psf not None, var=None, err=None,
+                                    gain=None, np.ndarray mask=None,
+                                    double maskthresh=0.0, fit_snr=5.0,
+                                    bint fit_positions=True,
+                                    bint keep_flagged=False,
+                                    int maxiter=20,
+                                    double group_factor=2.0,
+                                    min_qf=None, max_rchi2=None,
+                                    min_fracflux=None,
+                                    int peak_local_sky_box=20):
+    if len(catalog) == 0:
+        return catalog
+
+    data_arr = np.ascontiguousarray(data, dtype=np.float64)
+    model = _psf_peak_model(data_arr.shape, catalog, psf)
+    sky = _psf_peak_local_sky(
+        data_arr - model, var=var, mask=mask, maskthresh=maskthresh,
+        box_size=peak_local_sky_box)
+    peaks = _psf_peak_candidates_from_fit_catalog(catalog)
+    return _fit_psf_peaks(
+        data_arr - sky, peaks, psf, var=var, err=err, gain=gain, mask=mask,
+        maskthresh=maskthresh, fit_snr=fit_snr,
+        fit_positions=fit_positions, keep_flagged=keep_flagged,
+        maxiter=maxiter, group_factor=group_factor,
+        min_qf=min_qf, max_rchi2=max_rchi2,
+        min_fracflux=min_fracflux,
+    )
+
+
+def _psf_extract_peaks_iterative(np.ndarray data not None, float thresh,
+                                 PSF psf not None, var=None, err=None,
+                                 gain=None, np.ndarray mask=None,
+                                 double maskthresh=0.0,
+                                 bint return_snr=False,
+                                 bint local_bkg=False,
+                                 bint normalize_snr=False,
+                                 int snr_bw=64, int snr_bh=64,
+                                 int snr_fw=3, int snr_fh=3,
+                                 float snr_fthresh=0.0,
+                                 double peak_min_distance=1.5,
+                                 int maxfilter_size=3,
+                                 fit_snr=5.0,
+                                 bint fit_positions=True,
+                                 bint keep_flagged=False,
+                                 int fit_maxiter=20,
+                                 double group_factor=2.0,
+                                 min_qf=None, max_rchi2=None,
+                                 min_fracflux=None,
+                                 int peak_iterations=1,
+                                 peak_duplicate_distance=None,
+                                 bint peak_local_sky=False,
+                                 int peak_local_sky_box=20):
+    data_arr = np.ascontiguousarray(data, dtype=np.float64)
+    residual = data_arr.copy()
+    fit_data = data_arr
+    catalog = _empty_psf_peak_fit_catalog()
+    last_snr = None
+    duplicate_distance = peak_duplicate_distance
+    if duplicate_distance is None:
+        duplicate_distance = peak_min_distance
+
+    for _ in range(peak_iterations):
+        if peak_local_sky:
+            sky = _psf_peak_local_sky(
+                residual, var=var, mask=mask, maskthresh=maskthresh,
+                box_size=peak_local_sky_box)
+            detect_residual = residual - sky
+            fit_data = data_arr - sky
+        else:
+            detect_residual = residual
+            fit_data = data_arr
+
+        peak_result = psf_peaks(
+            detect_residual, thresh, psf, var=var, err=err, gain=gain,
+            mask=mask,
+            maskthresh=maskthresh, maxfilter_size=maxfilter_size,
+            min_distance=peak_min_distance, return_snr=return_snr,
+            local_bkg=local_bkg, normalize_snr=normalize_snr,
+            snr_bw=snr_bw, snr_bh=snr_bh, snr_fw=snr_fw, snr_fh=snr_fh,
+            snr_fthresh=snr_fthresh,
+        )
+        if return_snr:
+            peaks, last_snr = peak_result
+        else:
+            peaks = peak_result
+
+        if len(catalog) > 0 and len(peaks) > 0:
+            peaks = peaks[_peaks_far_from_sources(
+                peaks, catalog, duplicate_distance)]
+        if len(peaks) == 0:
+            break
+
+        if len(catalog) == 0:
+            refit_peaks = peaks
+        else:
+            refit_peaks = np.concatenate([
+                _psf_peak_candidates_from_fit_catalog(catalog),
+                peaks,
+            ])
+
+        fitted = _fit_psf_peaks(
+            fit_data, refit_peaks, psf, var=var, err=err, gain=gain, mask=mask,
+            maskthresh=maskthresh, fit_snr=fit_snr,
+            fit_positions=fit_positions, keep_flagged=keep_flagged,
+            maxiter=fit_maxiter, group_factor=group_factor,
+            min_qf=min_qf, max_rchi2=max_rchi2,
+            min_fracflux=min_fracflux,
+        )
+        if len(fitted) == 0:
+            break
+
+        if peak_local_sky:
+            fitted = _refit_psf_peaks_with_model_sky(
+                data_arr, fitted, psf, var=var, err=err, gain=gain,
+                mask=mask, maskthresh=maskthresh, fit_snr=fit_snr,
+                fit_positions=fit_positions, keep_flagged=keep_flagged,
+                maxiter=fit_maxiter, group_factor=group_factor,
+                min_qf=min_qf, max_rchi2=max_rchi2,
+                min_fracflux=min_fracflux,
+                peak_local_sky_box=peak_local_sky_box,
+            )
+            if len(fitted) == 0:
+                break
+
+        if len(catalog) > 0:
+            new_sources = _peaks_far_from_sources(
+                fitted, catalog, duplicate_distance)
+            if not np.any(new_sources):
+                break
+
+        catalog = fitted
+        residual = _rebuild_psf_peak_residual(data_arr, catalog, psf)
+
+    if return_snr:
+        return catalog, last_snr
+    return catalog
+
+
 def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
                 var=None, err=None, gain=None, np.ndarray mask=None,
                 double maskthresh=0.0, int minarea=1,
@@ -3709,8 +3990,10 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
                 double peak_min_distance=1.5, int maxfilter_size=3,
                 fit_snr=5.0, bint fit_positions=True,
                 bint keep_flagged=False, int fit_maxiter=20,
-                bint grouped=False, double group_factor=2.0,
-                min_qf=None, max_rchi2=None, min_fracflux=None):
+                double group_factor=2.0,
+                min_qf=None, max_rchi2=None, min_fracflux=None,
+                int peak_iterations=1, peak_duplicate_distance=None,
+                bint peak_local_sky=False, int peak_local_sky_box=20):
     """psf_extract(data, thresh, psf, var=None, err=None, mask=None, ...)
 
     Extract sources from a PSF-matched significance image.
@@ -3722,7 +4005,9 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
 
     In ``mode='peaks'``, this finds local maxima in the PSF-matched
     significance image with `psf_peaks`, then fits the PSF at those peak
-    positions and prunes by fitted S/N.
+    positions and prunes by fitted S/N. Set ``peak_iterations`` greater than
+    one to repeat this process on residual images after subtracting accepted
+    fitted sources.
 
     Parameters
     ----------
@@ -3774,14 +4059,27 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
         Set to None to return unfit peak candidates. Default is 5.0.
     fit_positions, keep_flagged, fit_maxiter : optional
         PSF fitting controls used in ``mode='peaks'``.
-    grouped : bool, optional
-        If True in ``mode='peaks'``, fit overlapping peak candidates
-        simultaneously before applying fitted-S/N pruning.
     group_factor : float, optional
-        Grouping radius factor passed to `psf_fit` when ``grouped=True``.
+        Grouping radius factor passed to the peak-mode PSF fits.
     min_qf, max_rchi2, min_fracflux : float or None, optional
         Optional quality cuts applied in ``mode='peaks'`` after PSF fitting
         and diagnostic computation. By default, no quality cuts are applied.
+    peak_iterations : int, optional
+        Number of residual-detection iterations in ``mode='peaks'``. Values
+        greater than one require fitted peak catalogs, so ``fit_snr`` may not
+        be None. Default is 1.
+    peak_duplicate_distance : float or None, optional
+        Minimum distance from already accepted peak-mode sources for accepting
+        peaks found in later residual iterations. By default, uses
+        ``peak_min_distance``.
+    peak_local_sky : bool, optional
+        If True in ``mode='peaks'``, estimate and subtract a local sky image
+        before peak fitting, then refit after re-estimating the sky from the
+        image with the fitted source model subtracted. For residual
+        iterations, the local sky is re-estimated from the current residual
+        image. Default is False.
+    peak_local_sky_box : int, optional
+        Mesh size in pixels for peak-mode local sky estimation.
 
     Returns
     -------
@@ -3801,8 +4099,36 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
     if mode == "peaks":
         if type(segmentation_map) is np.ndarray or segmentation_map:
             raise ValueError("segmentation_map is not supported with mode='peaks'")
+        if peak_iterations < 1:
+            raise ValueError("peak_iterations must be at least 1")
+        if peak_iterations > 1 and fit_snr is None:
+            raise ValueError("peak_iterations > 1 requires fit_snr not None")
+        if peak_iterations > 1:
+            return _psf_extract_peaks_iterative(
+                data, thresh, psf, var=var, err=err, gain=gain, mask=mask,
+                maskthresh=maskthresh, return_snr=return_snr,
+                local_bkg=local_bkg, normalize_snr=normalize_snr,
+                snr_bw=snr_bw, snr_bh=snr_bh, snr_fw=snr_fw,
+                snr_fh=snr_fh, snr_fthresh=snr_fthresh,
+                peak_min_distance=peak_min_distance,
+                maxfilter_size=maxfilter_size, fit_snr=fit_snr,
+                fit_positions=fit_positions, keep_flagged=keep_flagged,
+                fit_maxiter=fit_maxiter, group_factor=group_factor,
+                min_qf=min_qf,
+                max_rchi2=max_rchi2, min_fracflux=min_fracflux,
+                peak_iterations=peak_iterations,
+                peak_duplicate_distance=peak_duplicate_distance,
+                peak_local_sky=peak_local_sky,
+                peak_local_sky_box=peak_local_sky_box,
+            )
+        peak_data = data
+        if peak_local_sky:
+            peak_sky = _psf_peak_local_sky(
+                data, var=var, mask=mask, maskthresh=maskthresh,
+                box_size=peak_local_sky_box)
+            peak_data = np.ascontiguousarray(data, dtype=np.float64) - peak_sky
         peak_result = psf_peaks(
-            data, thresh, psf, var=var, err=err, gain=gain, mask=mask,
+            peak_data, thresh, psf, var=var, err=err, gain=gain, mask=mask,
             maskthresh=maskthresh, maxfilter_size=maxfilter_size,
             min_distance=peak_min_distance, return_snr=return_snr,
             local_bkg=local_bkg, normalize_snr=normalize_snr, snr_bw=snr_bw,
@@ -3817,13 +4143,22 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
             result = peaks
         else:
             result = _fit_psf_peaks(
-                data, peaks, psf, var=var, err=err, gain=gain, mask=mask,
+                peak_data, peaks, psf, var=var, err=err, gain=gain, mask=mask,
                 maskthresh=maskthresh, fit_snr=fit_snr,
                 fit_positions=fit_positions, keep_flagged=keep_flagged,
-                maxiter=fit_maxiter, grouped=grouped,
-                group_factor=group_factor, min_qf=min_qf,
+                maxiter=fit_maxiter, group_factor=group_factor, min_qf=min_qf,
                 max_rchi2=max_rchi2, min_fracflux=min_fracflux,
             )
+            if peak_local_sky:
+                result = _refit_psf_peaks_with_model_sky(
+                    data, result, psf, var=var, err=err, gain=gain,
+                    mask=mask, maskthresh=maskthresh, fit_snr=fit_snr,
+                    fit_positions=fit_positions, keep_flagged=keep_flagged,
+                    maxiter=fit_maxiter, group_factor=group_factor,
+                    min_qf=min_qf, max_rchi2=max_rchi2,
+                    min_fracflux=min_fracflux,
+                    peak_local_sky_box=peak_local_sky_box,
+                )
         if return_snr:
             return result, snr
         return result

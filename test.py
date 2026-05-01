@@ -2137,8 +2137,8 @@ def test_psf_extract_peaks_mode_rejects_segmentation_map():
         sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks", segmentation_map=True)
 
 
-def test_psf_extract_peaks_mode_grouped_reduces_blend_bias():
-    """Grouped peak-mode fits reduce independent-fit bias for close pairs."""
+def test_psf_extract_peaks_mode_deblends_close_pair():
+    """Peak-mode fits solve overlapping candidates jointly."""
     psf = sep.PSF.from_gaussian(fwhm=2.0)
     data = np.zeros((80, 80), dtype=np.float64)
     x = np.array([38.0, 42.0])
@@ -2146,24 +2146,17 @@ def test_psf_extract_peaks_mode_grouped_reduces_blend_bias():
     true_flux = np.array([300.0, 260.0])
     sep.model_psf(data, x, y, true_flux, psf)
 
-    independent = sep.psf_extract(
+    objects = sep.psf_extract(
         data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
-        fit_positions=False, grouped=False, peak_min_distance=0.0
+        fit_positions=False, group_factor=5.0, peak_min_distance=0.0
     )
-    grouped = sep.psf_extract(
-        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
-        fit_positions=False, grouped=True, group_factor=5.0,
-        peak_min_distance=0.0
-    )
+    objects.sort(order="x")
 
-    assert len(independent) == 2
-    assert len(grouped) == 2
-    err_independent = np.sum(np.abs(independent["flux"] - true_flux))
-    err_grouped = np.sum(np.abs(grouped["flux"] - true_flux))
-    assert err_grouped < 0.01 * err_independent
-    assert np.all(grouped["qf"] > 0.99)
-    assert np.all(grouped["fracflux"] < 1.0)
-    assert np.all(grouped["fracflux"] > 0.98)
+    assert len(objects) == 2
+    assert_allclose(objects["flux"], true_flux, rtol=1e-5)
+    assert np.all(objects["qf"] > 0.99)
+    assert np.all(objects["fracflux"] < 1.0)
+    assert np.all(objects["fracflux"] > 0.98)
 
 
 def test_psf_extract_peaks_mode_applies_quality_cuts():
@@ -2176,13 +2169,13 @@ def test_psf_extract_peaks_mode_applies_quality_cuts():
 
     loose = sep.psf_extract(
         data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
-        fit_positions=False, grouped=True, group_factor=5.0,
-        peak_min_distance=0.0, min_fracflux=0.98
+        fit_positions=False, group_factor=5.0, peak_min_distance=0.0,
+        min_fracflux=0.98
     )
     strict = sep.psf_extract(
         data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
-        fit_positions=False, grouped=True, group_factor=5.0,
-        peak_min_distance=0.0, min_fracflux=0.995
+        fit_positions=False, group_factor=5.0, peak_min_distance=0.0,
+        min_fracflux=0.995
     )
 
     assert len(loose) == 2
@@ -2205,6 +2198,93 @@ def test_psf_extract_peaks_mode_applies_quality_cuts():
     assert len(accepted) == 1
     assert accepted["rchi2"][0] > 0.5
     assert len(rejected) == 0
+
+
+def test_psf_extract_peaks_mode_local_sky_corrects_flux():
+    """Peak-mode local sky subtraction removes constant sky bias in fits."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.full((80, 80), -10.0, dtype=np.float64)
+    sep.model_psf(data, [40.0], [41.0], [800.0], psf)
+
+    biased = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False
+    )
+    corrected = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, peak_local_sky=True, peak_local_sky_box=20
+    )
+
+    assert len(biased) == 1
+    assert len(corrected) == 1
+    assert abs(corrected["flux"][0] - 800.0) < abs(biased["flux"][0] - 800.0)
+    assert_allclose(corrected["flux"][0], 800.0, rtol=1e-5)
+
+
+def test_psf_extract_peaks_mode_local_sky_refits_after_model_subtraction():
+    """Local sky fitting refits after subtracting the current source model."""
+    pytest.importorskip("scipy.ndimage")
+
+    psf = sep.PSF.from_gaussian(fwhm=8.0, oversampling=2)
+    data = np.zeros((100, 100), dtype=np.float64)
+    true_flux = 20000.0
+    sep.model_psf(data, [50.0], [50.0], [true_flux], psf)
+
+    sky = sep._psf_peak_local_sky(data, var=25.0, box_size=20)
+    peak_data = data - sky
+    peaks = sep.psf_peaks(peak_data, 5.0, psf, var=25.0)
+    first_pass = sep._fit_psf_peaks(
+        peak_data, peaks, psf, var=25.0, fit_snr=0.0,
+        fit_positions=False
+    )
+    refit = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, peak_local_sky=True, peak_local_sky_box=20
+    )
+
+    assert len(first_pass) == 1
+    assert len(refit) == 1
+    assert first_pass["flux"][0] < 0.95 * true_flux
+    assert abs(refit["flux"][0] - true_flux) < abs(first_pass["flux"][0] - true_flux)
+    assert_allclose(refit["flux"][0], true_flux, rtol=0.01)
+
+
+def test_psf_extract_peaks_mode_iterates_on_residuals():
+    """Iterative peak mode can recover a source suppressed in the first pass."""
+    psf = sep.PSF.from_gaussian(fwhm=2.0)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(data, [38.0, 42.0], [40.0, 40.0], [500.0, 120.0], psf)
+
+    single = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=5.0,
+        fit_positions=False, peak_min_distance=5.0, peak_iterations=1
+    )
+    iterative = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=5.0,
+        fit_positions=False, peak_min_distance=5.0,
+        peak_duplicate_distance=1.0, peak_iterations=3
+    )
+
+    assert len(single) == 1
+    assert len(iterative) == 2
+    assert_allclose(np.sort(iterative["x"]), [38.0, 42.0], atol=0.1)
+    iterative.sort(order="x")
+
+    assert_allclose(iterative["flux"], [500.0, 120.0], rtol=1e-5)
+    assert np.min(iterative["peak_snr"]) > 5.0
+
+
+def test_psf_extract_peaks_mode_iterative_option_validation():
+    """Residual iterations require fitted peak catalogs."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((32, 32), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="peak_iterations"):
+        sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks",
+                        peak_iterations=0)
+    with pytest.raises(ValueError, match="requires fit_snr"):
+        sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks",
+                        fit_snr=None, peak_iterations=2)
 
 
 def test_fit_psf_peaks_applies_qf_cut():

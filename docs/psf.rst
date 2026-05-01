@@ -170,15 +170,42 @@ The fitted peak catalog may also be pruned with optional quality cuts:
 ``min_qf`` rejects incomplete PSF footprints, ``max_rchi2`` rejects poor PSF
 fits, and ``min_fracflux`` rejects candidates whose fitted source model
 accounts for only a small fraction of the local PSF-weighted flux.
+For crowded stellar fields, a conservative cleanup pass is to keep the fitted
+S/N cut at ``fit_snr=5.0`` and add ``max_rchi2=50.0`` and
+``min_fracflux=0.5``. Lower ``max_rchi2`` values, such as ``30.0`` or
+``20.0``, produce cleaner but less complete catalogs and should be tuned for
+the image depth and crowding.
 
-Set ``grouped=True`` to fit overlapping peak candidates simultaneously before
-applying the fitted-S/N cut:
+Fitted peak catalogs always fit overlapping peak candidates simultaneously
+before applying the fitted-S/N and quality cuts.
+
+Set ``peak_local_sky=True`` to estimate and subtract a local sky image before
+fitting peak candidates. Fitted catalogs are then refit after re-estimating
+the sky from the image with the fitted source model subtracted. This is useful
+when the input image has residual large-scale background structure after
+global background subtraction:
 
 .. code-block:: python
 
     objects = sep.psf_extract(
         data, 5.0, psf, var=variance, mode="peaks",
-        fit_snr=5.0, grouped=True
+        fit_snr=5.0, peak_local_sky=True
+    )
+
+To look for fainter peaks hidden under already accepted sources, set
+``peak_iterations`` greater than one. Each iteration detects peaks in the
+current residual image, then refits the accumulated peak list on the original
+image before rebuilding the residual model. ``peak_duplicate_distance``
+controls how close later residual peaks may be to sources accepted in earlier
+iterations:
+
+.. code-block:: python
+
+    objects = sep.psf_extract(
+        data, 5.0, psf, var=variance, mode="peaks",
+        fit_snr=5.0, peak_iterations=2,
+        peak_duplicate_distance=1.0, peak_local_sky=True,
+        max_rchi2=50.0, min_fracflux=0.5
     )
 
 Building a PSF image model
