@@ -1467,6 +1467,209 @@ int sep_sum_psf(const sep_image *im, sep_psf *psf, double x, double y, int id,
   return status;
 }
 
+int sep_psf_snr(const sep_image *im, sep_psf *psf, int local_bkg,
+                double *out) {
+  int ix0, iy0;
+  int sx, sy;
+  int64_t imx, imy, pos, opos;
+  int status = RETURN_OK;
+  int errisarray, errisstd;
+  int64_t size, esize, msize;
+  const void *datat, *errort, *maskt;
+  converter convert, econvert, mconvert;
+
+  if ((status = get_converter(im->dtype, &convert, &size))) return status;
+  if (im->mask && (status = get_converter(im->mdtype, &mconvert, &msize)))
+    return status;
+
+  errisarray = 0;
+  errisstd = 0;
+  esize = 0;
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize)))
+        return status;
+    }
+  }
+
+  if (psf->degree == 0 && psf->ncomp == 1) {
+    double scalar_var = 1.0;
+    double psfsum = 0.0;
+
+    status = sep_psf_build(psf, 0.0, 0.0);
+    if (status != RETURN_OK) return status;
+    status = sep_psf_resample(psf, 0.0, 0.0);
+    if (status != RETURN_OK) return status;
+
+    for (sx = 0; sx < psf->rw * psf->rh; sx++) psfsum += psf->resi[sx];
+    if (psfsum <= 0.0) {
+      for (pos = 0; pos < im->w * im->h; pos++) out[pos] = 0.0;
+      return status;
+    }
+    for (sx = 0; sx < psf->rw * psf->rh; sx++) psf->resi[sx] /= (float)psfsum;
+
+    if (im->noise_type != SEP_NOISE_NONE && !errisarray) {
+      scalar_var = errisstd ? im->noiseval * im->noiseval : im->noiseval;
+    }
+
+    for (iy0 = 0; iy0 < im->h; iy0++) {
+      for (ix0 = 0; ix0 < im->w; ix0++) {
+        double num = 0.0, den = 0.0;
+        double sumw = 0.0, sumpw = 0.0, sumdw = 0.0;
+
+        opos = (int64_t)iy0 * im->w + ix0;
+        out[opos] = 0.0;
+
+        for (sy = 0; sy < psf->rh; sy++) {
+          imy = iy0 - psf->rh / 2 + sy;
+          if (imy < 0 || imy >= im->h) continue;
+
+          for (sx = 0; sx < psf->rw; sx++) {
+            double psfw, pix, varpix, total_var;
+
+            imx = ix0 - psf->rw / 2 + sx;
+            if (imx < 0 || imx >= im->w) continue;
+
+            psfw = psf->resi[sy * psf->rw + sx];
+            if (psfw == 0.0) continue;
+
+            pos = imy * im->w + imx;
+
+            if (im->mask) {
+              maskt = (const char *)im->mask + pos * msize;
+              if (mconvert(maskt) > im->maskthresh) continue;
+            }
+
+            datat = (const char *)im->data + pos * size;
+            pix = convert(datat);
+
+            if (errisarray) {
+              errort = (const char *)im->noise + pos * esize;
+              varpix = econvert(errort);
+              if (errisstd) varpix *= varpix;
+            } else {
+              varpix = scalar_var;
+            }
+
+            if (varpix <= 0.0) continue;
+
+            total_var = varpix;
+            if (im->gain > 0.0 && pix > 0.0) {
+              total_var += pix / im->gain;
+            }
+
+            {
+              double invvar = 1.0 / total_var;
+              num += psfw * pix * invvar;
+              den += psfw * psfw * invvar;
+              if (local_bkg) {
+                sumpw += psfw * invvar;
+                sumdw += pix * invvar;
+                sumw += invvar;
+              }
+            }
+          }
+        }
+
+        if (local_bkg) {
+          double det = den * sumw - sumpw * sumpw;
+          if (det > 0.0 && sumw > 0.0) {
+            out[opos] = (num * sumw - sumpw * sumdw) / sqrt(det * sumw);
+          }
+        } else if (den > 0.0) {
+          out[opos] = num / sqrt(den);
+        }
+      }
+    }
+
+    return status;
+  }
+
+  for (iy0 = 0; iy0 < im->h; iy0++) {
+    for (ix0 = 0; ix0 < im->w; ix0++) {
+      double psfsum = 0.0;
+      double num = 0.0, den = 0.0;
+      double sumw = 0.0, sumpw = 0.0, sumdw = 0.0;
+      double varpix = 1.0;
+
+      opos = (int64_t)iy0 * im->w + ix0;
+      out[opos] = 0.0;
+
+      status = sep_psf_build(psf, (double)ix0, (double)iy0);
+      if (status != RETURN_OK) return status;
+      status = sep_psf_resample(psf, 0.0, 0.0);
+      if (status != RETURN_OK) return status;
+
+      for (sx = 0; sx < psf->rw * psf->rh; sx++) psfsum += psf->resi[sx];
+      if (psfsum <= 0.0) continue;
+
+      for (sy = 0; sy < psf->rh; sy++) {
+        imy = iy0 - psf->rh / 2 + sy;
+        if (imy < 0 || imy >= im->h) continue;
+
+        for (sx = 0; sx < psf->rw; sx++) {
+          double psfw, pix, total_var;
+
+          imx = ix0 - psf->rw / 2 + sx;
+          if (imx < 0 || imx >= im->w) continue;
+
+          psfw = psf->resi[sy * psf->rw + sx] / psfsum;
+          if (psfw == 0.0) continue;
+
+          pos = imy * im->w + imx;
+
+          if (im->mask) {
+            maskt = (const char *)im->mask + pos * msize;
+            if (mconvert(maskt) > im->maskthresh) continue;
+          }
+
+          datat = (const char *)im->data + pos * size;
+          pix = convert(datat);
+
+          if (errisarray) {
+            errort = (const char *)im->noise + pos * esize;
+            varpix = econvert(errort);
+            if (errisstd) varpix *= varpix;
+          } else if (im->noise_type != SEP_NOISE_NONE) {
+            varpix = errisstd ? im->noiseval * im->noiseval : im->noiseval;
+          }
+
+          if (varpix <= 0.0) continue;
+
+          total_var = varpix;
+          if (im->gain > 0.0 && pix > 0.0) {
+            total_var += pix / im->gain;
+          }
+
+          {
+            double invvar = 1.0 / total_var;
+            num += psfw * pix * invvar;
+            den += psfw * psfw * invvar;
+            if (local_bkg) {
+              sumpw += psfw * invvar;
+              sumdw += pix * invvar;
+              sumw += invvar;
+            }
+          }
+        }
+      }
+
+      if (local_bkg) {
+        double det = den * sumw - sumpw * sumpw;
+        if (det > 0.0 && sumw > 0.0) {
+          out[opos] = (num * sumw - sumpw * sumdw) / sqrt(det * sumw);
+        }
+      } else if (den > 0.0) {
+        out[opos] = num / sqrt(den);
+      }
+    }
+  }
+
+  return status;
+}
+
 /*==========================================================================*/
 /*           Design Matrix Construction (ported from SExtractor)            */
 /*==========================================================================*/

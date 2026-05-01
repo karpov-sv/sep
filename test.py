@@ -160,6 +160,69 @@ def matched_filter_snr(data, noise, kernel):
     return out
 
 
+def matched_filter_snr_local_bkg(data, noise, kernel):
+    r"""
+    Slow matched-filter S/N with a local constant-background term.
+
+    At each output pixel, fit data as source * kernel + background with
+    inverse-variance weights, then return the source-amplitude significance
+    after marginalizing over the local background.
+    """
+    ctr = kernel.shape[0] // 2, kernel.shape[1] // 2
+    kslice = (
+        (0 - ctr[0], kernel.shape[0] - ctr[0]),
+        (0 - ctr[1], kernel.shape[1] - ctr[1]),
+    )
+    out = np.zeros_like(data)
+
+    for y in range(data.shape[0]):
+        jmin = y + kslice[0][0]
+        jmax = y + kslice[0][1]
+        kjmin = 0
+        kjmax = kernel.shape[0]
+
+        if jmin < 0:
+            offset = -jmin
+            jmin += offset
+            kjmin += offset
+        if jmax > data.shape[0]:
+            offset = data.shape[0] - jmax
+            jmax += offset
+            kjmax += offset
+
+        for x in range(data.shape[1]):
+            imin = x + kslice[1][0]
+            imax = x + kslice[1][1]
+            kimin = 0
+            kimax = kernel.shape[1]
+
+            if imin < 0:
+                offset = -imin
+                imin += offset
+                kimin += offset
+            if imax > data.shape[1]:
+                offset = data.shape[1] - imax
+                imax += offset
+                kimax += offset
+
+            d = data[jmin:jmax, imin:imax]
+            n = noise[jmin:jmax, imin:imax]
+            p = kernel[kjmin:kjmax, kimin:kimax]
+            invvar = 1.0 / n**2
+
+            num = np.sum(p * d * invvar)
+            den = np.sum(p**2 * invvar)
+            sumw = np.sum(invvar)
+            sumpw = np.sum(p * invvar)
+            sumdw = np.sum(d * invvar)
+            det = den * sumw - sumpw * sumpw
+
+            if det > 0.0 and sumw > 0.0:
+                out[y, x] = (num * sumw - sumpw * sumdw) / np.sqrt(det * sumw)
+
+    return out
+
+
 _ERF = np.vectorize(math.erf, otypes=[float])
 
 
@@ -1528,6 +1591,27 @@ def _make_gaussian_source(nx, ny, xcen, ycen, flux, fwhm):
     return img.astype(np.float32)
 
 
+def _gaussian_kernel(size, sigma):
+    """Create a normalized native-pixel Gaussian kernel."""
+    y, x = np.mgrid[0:size, 0:size]
+    c = size // 2
+    kernel = np.exp(-((x - c) ** 2 + (y - c) ** 2) / (2.0 * sigma**2))
+    return (kernel / kernel.sum()).astype(np.float32)
+
+
+def _psf_native_kernel(psf):
+    """Render a constant PSF as a native-pixel filter kernel."""
+    kernel = np.zeros((psf.stamp_height, psf.stamp_width), dtype=np.float64)
+    sep.model_psf(
+        kernel,
+        [psf.stamp_width // 2],
+        [psf.stamp_height // 2],
+        [1.0],
+        psf,
+    )
+    return kernel
+
+
 def test_psf_from_gaussian():
     """PSF.from_gaussian creates a valid PSF model."""
     psf = sep.PSF.from_gaussian(fwhm=3.5)
@@ -1611,6 +1695,436 @@ def test_psf_flux_only():
     )
     assert_allclose(flux, 1000.0, rtol=0.01)
     assert flag == 0
+
+
+def test_psf_snr_matches_flux_only_snr():
+    """psf_snr matches fixed-position PSF flux divided by its error."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.zeros((64, 64), dtype=np.float64)
+    sep.model_psf(data, [32.0], [32.0], [1000.0], psf)
+
+    snr = sep.psf_snr(data, psf, var=25.0)
+    flux, fluxerr, _, _, flag, _, _ = sep.psf_fit(
+        data, 32.0, 32.0, psf, var=25.0, fit_positions=False
+    )
+
+    assert flag == 0
+    assert_allclose(snr[32, 32], flux / fluxerr, rtol=1e-12)
+    assert np.argmax(snr) == np.ravel_multi_index((32, 32), snr.shape)
+
+
+def test_psf_snr_matches_spatially_varying_constant_component():
+    """Fast constant-PSF path matches the generic spatially varying path."""
+    fwhm = 3.5
+    oversampling = 2
+    size = int(np.ceil(4.0 * fwhm))
+    if size % 2 == 0:
+        size += 1
+    ossize = size * oversampling
+    sigma = fwhm / 2.354820045 * oversampling
+    y, x = np.mgrid[0:ossize, 0:ossize]
+    stamp = np.exp(
+        -((x - ossize // 2) ** 2 + (y - ossize // 2) ** 2) / (2.0 * sigma**2)
+    )
+    stamp = (stamp / stamp.sum()).astype(np.float32)
+    data = stamp[np.newaxis, :, :]
+    zeros = np.zeros_like(data)
+    psf_fast = sep.PSF(data, sampling=1.0 / oversampling, degree=0, fwhm=fwhm)
+    psf_generic = sep.PSF(
+        np.concatenate([data, zeros, zeros], axis=0),
+        sampling=psf_fast.sampling,
+        degree=1,
+        x0=0.0,
+        y0=0.0,
+        sx=1.0,
+        sy=1.0,
+        fwhm=fwhm,
+    )
+
+    image = np.zeros((48, 48), dtype=np.float64)
+    sep.model_psf(image, [24.0], [24.0], [500.0], psf_fast)
+    var = np.ones_like(image) * 9.0
+
+    snr_fast = sep.psf_snr(image, psf_fast, var=var)
+    snr_generic = sep.psf_snr(image, psf_generic, var=var)
+
+    assert_allclose(snr_fast, snr_generic, rtol=1e-7, atol=1e-10)
+
+
+def test_psf_snr_matches_matched_filter_for_constant_psf():
+    """Constant-PSF S/N matches the extract matched-filter statistic."""
+    rng = np.random.default_rng(123)
+    psf = sep.PSF.from_gaussian(fwhm=3.5, oversampling=2)
+    kernel = _psf_native_kernel(psf)
+    data = rng.normal(size=(32, 33))
+    err = np.full_like(data, 2.5)
+
+    snr = sep.psf_snr(data, psf, err=err)
+    expected = matched_filter_snr(data, err, kernel)
+
+    assert_allclose(snr, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_psf_snr_matches_matched_filter_orientation():
+    """An asymmetric constant PSF uses the same orientation as matched filter."""
+    rng = np.random.default_rng(456)
+    kernel = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 2.0, 0.0, 0.0],
+            [0.0, 3.0, 6.0, 1.0, 0.0],
+            [0.0, 0.0, 2.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    kernel /= kernel.sum()
+    psf = sep.PSF(kernel, sampling=1.0, degree=0, fwhm=2.0)
+    data = rng.normal(size=(24, 25))
+    err = 1.7 + 0.2 * rng.random(size=data.shape)
+
+    snr = sep.psf_snr(data, psf, err=err)
+    expected = matched_filter_snr(data, err, kernel)
+
+    assert_allclose(snr, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_psf_snr_matches_matched_filter_with_mask():
+    """Masked pixels are excluded like infinite-noise matched-filter pixels."""
+    rng = np.random.default_rng(789)
+    psf = sep.PSF.from_gaussian(fwhm=3.0, oversampling=2)
+    kernel = _psf_native_kernel(psf)
+    data = rng.normal(size=(30, 31))
+    err = 2.0 + 0.5 * rng.random(size=data.shape)
+    mask = np.zeros(data.shape, dtype=np.uint8)
+    mask[10:14, 12:16] = 1
+    mask[20, 5:11] = 1
+
+    masked_data = data.copy()
+    masked_data[mask > 0] = 0.0
+    masked_err = err.copy()
+    masked_err[mask > 0] = 1.0e30
+
+    snr = sep.psf_snr(data, psf, err=err, mask=mask)
+    expected = matched_filter_snr(masked_data, masked_err, kernel)
+
+    assert_allclose(snr, expected, rtol=1e-6, atol=1e-7)
+
+
+def test_psf_extract_uses_spatially_varying_psf():
+    """A spatially varying PSF detects a source missed by a fixed kernel."""
+    size = 15
+    left = _gaussian_kernel(size, 1.0)
+    right = _gaussian_kernel(size, 2.7)
+    const = 0.5 * (left + right)
+    xcomp = 0.5 * (right - left)
+    ycomp = np.zeros_like(const)
+
+    psf_var = sep.PSF(
+        np.stack([const, xcomp, ycomp]),
+        sampling=1.0,
+        degree=1,
+        x0=50.0,
+        y0=0.0,
+        sx=40.0,
+        sy=1.0,
+        fwhm=3.5,
+    )
+    psf_fixed = sep.PSF(const, sampling=1.0, degree=0, fwhm=3.5)
+
+    data = np.zeros((80, 110), dtype=np.float64)
+    x = np.array([10.0, 90.0])
+    y = np.array([40.0, 40.0])
+    sep.model_psf(data, x, y, [100.0, 100.0], psf_var)
+
+    snr_var = sep.psf_snr(data, psf_var, var=1.0)
+    snr_fixed = sep.psf_snr(data, psf_fixed, var=1.0)
+
+    assert snr_var[40, 90] > 1.2 * snr_fixed[40, 90]
+
+    objects_var = sep.psf_extract(data, 9.5, psf_var, var=1.0, minarea=1)
+    objects_fixed = sep.psf_extract(data, 9.5, psf_fixed, var=1.0, minarea=1)
+
+    assert len(objects_var) == 2
+    assert len(objects_fixed) == 1
+
+
+def test_psf_snr_gain_matches_data_dependent_matched_filter():
+    """gain adds positive pixel values to the matched-filter variance."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5, oversampling=2)
+    kernel = _psf_native_kernel(psf)
+    data = np.zeros((48, 49), dtype=np.float64)
+    sep.model_psf(data, [24.0], [23.0], [700.0], psf)
+    data[8:13, 35:40] -= 20.0
+
+    gain = 2.5
+    total_var = 16.0 + np.maximum(data, 0.0) / gain
+
+    snr = sep.psf_snr(data, psf, var=16.0, gain=gain)
+    expected = matched_filter_snr(data, np.sqrt(total_var), kernel)
+
+    assert_allclose(snr, expected, rtol=1e-6, atol=1e-7)
+
+
+def test_psf_snr_gain_lowers_positive_source_significance():
+    """Poisson variance from gain reduces S/N for bright positive sources."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((64, 64), dtype=np.float64)
+    sep.model_psf(data, [32.0], [32.0], [1000.0], psf)
+
+    snr_no_gain = sep.psf_snr(data, psf, var=25.0)
+    snr_gain = sep.psf_snr(data, psf, var=25.0, gain=1.0)
+
+    assert snr_gain[32, 32] < snr_no_gain[32, 32]
+
+
+def test_psf_snr_local_bkg_matches_weighted_two_parameter_fit():
+    """local_bkg=True matches a source-plus-constant weighted fit."""
+    rng = np.random.default_rng(321)
+    psf = sep.PSF.from_gaussian(fwhm=3.2, oversampling=2)
+    kernel = _psf_native_kernel(psf)
+    yy, xx = np.indices((34, 35))
+    data = 12.0 + 0.02 * xx - 0.01 * yy
+    data += rng.normal(scale=0.05, size=data.shape)
+    sep.model_psf(data, [18.0], [17.0], [120.0], psf)
+
+    err = 1.5 + 0.2 * rng.random(size=data.shape)
+    mask = np.zeros(data.shape, dtype=np.uint8)
+    mask[12:15, 16:19] = 1
+    mask[23, 4:9] = 1
+
+    masked_data = data.copy()
+    masked_data[mask > 0] = 0.0
+    masked_err = err.copy()
+    masked_err[mask > 0] = 1.0e30
+
+    snr = sep.psf_snr(data, psf, err=err, mask=mask, local_bkg=True)
+    expected = matched_filter_snr_local_bkg(masked_data, masked_err, kernel)
+
+    assert_allclose(snr, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_psf_snr_respects_variable_variance_and_mask():
+    """High variance and masked pixels are downweighted in PSF significance."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.zeros((64, 64), dtype=np.float64)
+    sep.model_psf(data, [32.0], [32.0], [1000.0], psf)
+
+    var = np.ones_like(data)
+    snr_uniform = sep.psf_snr(data, psf, var=var)
+
+    var_high = var.copy()
+    var_high[29:36, 29:36] = 100.0
+    snr_high_var = sep.psf_snr(data, psf, var=var_high)
+
+    mask = np.zeros_like(data, dtype=np.uint8)
+    mask[29:36, 29:36] = 1
+    snr_masked = sep.psf_snr(data, psf, var=var, mask=mask)
+
+    assert snr_high_var[32, 32] < snr_uniform[32, 32]
+    assert snr_masked[32, 32] < snr_high_var[32, 32]
+
+
+def test_psf_snr_local_bkg_rejects_constant_background():
+    """Local-background PSF S/N removes constant offsets in the footprint."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.full((64, 64), 100.0, dtype=np.float64)
+
+    snr_plain = sep.psf_snr(data, psf, var=25.0)
+    snr_lbs = sep.psf_snr(data, psf, var=25.0, local_bkg=True)
+
+    assert snr_plain[32, 32] > 1.0
+    assert abs(snr_lbs[32, 32]) < 1e-10
+
+
+def test_psf_snr_local_bkg_keeps_point_source():
+    """Local-background PSF S/N still detects a compact source."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.full((64, 64), 100.0, dtype=np.float64)
+    sep.model_psf(data, [32.0], [32.0], [500.0], psf)
+
+    snr_lbs = sep.psf_snr(data, psf, var=25.0, local_bkg=True)
+
+    assert snr_lbs[32, 32] > 5.0
+    assert np.argmax(snr_lbs) == np.ravel_multi_index((32, 32), snr_lbs.shape)
+
+
+def test_psf_extract_detects_psf_weighted_sources():
+    """psf_extract detects sources from the PSF-matched S/N image."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.zeros((80, 80), dtype=np.float64)
+    xtrue = np.array([25.0, 55.0])
+    ytrue = np.array([28.0, 52.0])
+    sep.model_psf(data, xtrue, ytrue, [250.0, 180.0], psf)
+
+    objects, snr = sep.psf_extract(
+        data, 5.0, psf, var=25.0, minarea=1, return_snr=True
+    )
+
+    assert len(objects) == 2
+    peaks = sorted(zip(objects["xpeak"], objects["ypeak"]))
+    assert peaks == [(25, 28), (55, 52)]
+    assert snr[28, 25] > 5.0
+    assert snr[52, 55] > 5.0
+
+
+def test_psf_extract_returns_segmap_and_respects_mask():
+    """psf_extract passes masks and segmentation output through extract."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.zeros((64, 64), dtype=np.float64)
+    sep.model_psf(data, [32.0], [32.0], [300.0], psf)
+
+    objects, segmap, snr = sep.psf_extract(
+        data, 5.0, psf, var=25.0, segmentation_map=True, return_snr=True
+    )
+    assert len(objects) == 1
+    assert segmap.shape == data.shape
+    assert snr[32, 32] > 5.0
+
+    mask = np.zeros_like(data, dtype=np.uint8)
+    mask[24:41, 24:41] = 1
+    masked = sep.psf_extract(data, 5.0, psf, var=25.0, mask=mask)
+    assert len(masked) == 0
+
+
+def test_psf_extract_can_normalize_snr_background():
+    """psf_extract can renormalize a biased PSF-matched detection image."""
+    rng = np.random.default_rng(123)
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = rng.normal(100.0, 5.0, size=(128, 128))
+    sep.model_psf(data, [64.0], [65.0], [350.0], psf)
+
+    objects, snr = sep.psf_extract(
+        data,
+        5.0,
+        psf,
+        var=25.0,
+        minarea=1,
+        return_snr=True,
+        normalize_snr=True,
+        snr_bw=32,
+        snr_bh=32,
+    )
+
+    assert len(objects) == 1
+    assert objects["xpeak"][0] == 64
+    assert objects["ypeak"][0] == 65
+    assert abs(np.median(snr)) < 0.5
+
+
+def test_psf_peaks_finds_local_maxima():
+    """psf_peaks returns local maxima from a PSF-matched S/N image."""
+    fwhm = 3.5
+    psf = sep.PSF.from_gaussian(fwhm=fwhm)
+    data = np.zeros((80, 80), dtype=np.float64)
+    xtrue = np.array([25.0, 55.0])
+    ytrue = np.array([28.0, 52.0])
+    sep.model_psf(data, xtrue, ytrue, [250.0, 180.0], psf)
+
+    peaks, snr = sep.psf_peaks(
+        data, 5.0, psf, var=25.0, min_distance=1.5, return_snr=True
+    )
+
+    assert len(peaks) == 2
+    assert sorted(zip(peaks["xpeak"], peaks["ypeak"])) == [(25, 28), (55, 52)]
+    assert_allclose(peaks["snr"], snr[peaks["ypeak"], peaks["xpeak"]])
+
+
+def test_psf_peaks_suppresses_close_peaks():
+    """psf_peaks greedily suppresses peaks closer than min_distance."""
+    psf = sep.PSF.from_gaussian(fwhm=2.0)
+    data = np.zeros((60, 60), dtype=np.float64)
+    sep.model_psf(data, [28.0, 32.0], [30.0, 30.0], [300.0, 260.0], psf)
+
+    unsuppressed = sep.psf_peaks(data, 5.0, psf, var=25.0, min_distance=0.0)
+    suppressed = sep.psf_peaks(data, 5.0, psf, var=25.0, min_distance=5.0)
+
+    assert len(unsuppressed) == 2
+    assert len(suppressed) == 1
+    assert suppressed["xpeak"][0] == 28
+    assert suppressed["ypeak"][0] == 30
+
+
+def test_psf_peaks_can_normalize_snr_background():
+    """psf_peaks supports the same S/N normalization as psf_extract."""
+    rng = np.random.default_rng(123)
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = rng.normal(100.0, 5.0, size=(128, 128))
+    sep.model_psf(data, [64.0], [65.0], [350.0], psf)
+
+    peaks, snr = sep.psf_peaks(
+        data,
+        5.0,
+        psf,
+        var=25.0,
+        return_snr=True,
+        normalize_snr=True,
+        snr_bw=32,
+        snr_bh=32,
+    )
+
+    assert len(peaks) == 1
+    assert peaks["xpeak"][0] == 64
+    assert peaks["ypeak"][0] == 65
+    assert abs(np.median(snr)) < 0.5
+
+
+def test_psf_extract_peaks_mode_returns_fit_catalog():
+    """psf_extract(mode='peaks') fits and prunes peak candidates."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(data, [25.0, 55.0], [28.0, 52.0], [250.0, 120.0], psf)
+
+    objects = sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks", fit_snr=8.0)
+
+    assert objects.dtype.names == (
+        "x",
+        "y",
+        "flux",
+        "fluxerr",
+        "fit_snr",
+        "peak_snr",
+        "xpeak",
+        "ypeak",
+        "flag",
+    )
+    assert len(objects) == 1
+    assert_allclose(objects["x"][0], 25.0, atol=0.1)
+    assert_allclose(objects["y"][0], 28.0, atol=0.1)
+    assert objects["fit_snr"][0] > 8.0
+
+
+def test_psf_extract_peaks_mode_can_return_raw_peaks():
+    """fit_snr=None returns raw peak candidates from psf_extract."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(data, [25.0, 55.0], [28.0, 52.0], [250.0, 180.0], psf)
+
+    direct = sep.psf_peaks(data, 5.0, psf, var=25.0)
+    via_extract, snr = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=None, return_snr=True
+    )
+
+    assert_allclose(via_extract["x"], direct["x"])
+    assert_allclose(via_extract["y"], direct["y"])
+    assert_allclose(via_extract["snr"], direct["snr"])
+    assert snr[28, 25] > 5.0
+
+
+def test_psf_extract_peaks_mode_rejects_segmentation_map():
+    """mode='peaks' does not support connected segmentation maps."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((32, 32), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="segmentation_map"):
+        sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks", segmentation_map=True)
 
 
 def test_psf_fit_exact_center():

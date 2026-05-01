@@ -31,6 +31,9 @@ Reference/API
    sep.PSF.from_gaussian
    sep.PSF.from_psfex
    sep.model_psf
+   sep.psf_snr
+   sep.psf_peaks
+   sep.psf_extract
    sep.psf_fit
 
 **Aperture utilities**

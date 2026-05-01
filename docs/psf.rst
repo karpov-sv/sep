@@ -87,6 +87,83 @@ With ``fit_positions=True`` (default), SEP iteratively solves for flux and
 subpixel shifts ``(dx, dy)`` using a linearized least-squares model per
 iteration.
 
+PSF-matched significance image
+------------------------------
+
+Use `sep.psf_snr` to compute a PSF-matched significance image:
+
+.. code-block:: python
+
+    snr = sep.psf_snr(data, psf, var=variance)
+
+At each pixel, SEP evaluates the PSF centered on that pixel and computes
+
+.. math::
+
+   \mathrm{SNR} = \frac{\sum_i P_i D_i / V_i}
+                      {\sqrt{\sum_i P_i^2 / V_i}}
+
+Masked pixels and pixels with non-positive variance are excluded from each
+local sum. The result can be used as a PSF-weighted detection image.
+
+Set ``local_bkg=True`` to fit and remove a constant background term inside
+each PSF footprint:
+
+.. code-block:: python
+
+    snr = sep.psf_snr(data, psf, var=variance, local_bkg=True)
+
+Use `sep.psf_extract` to run source extraction directly on this detection
+image. By default, ``mode="segments"`` uses SEP's connected-component
+extraction and deblending on the PSF-matched significance image:
+
+.. code-block:: python
+
+    objects = sep.psf_extract(data, 5.0, psf, var=variance)
+
+This is equivalent to calling `sep.psf_snr` followed by `sep.extract` with
+``filter_kernel=None``. Catalog ``flux`` and ``peak`` fields are therefore
+measured on the S/N image, not on the original data.
+
+For crowded fields, unresolved wings, or correlated noise, the raw
+PSF-matched image may have a biased background or a non-unit empirical RMS.
+Set ``normalize_snr=True`` to estimate a SEP background model on the
+PSF-matched image before thresholding:
+
+.. code-block:: python
+
+    objects = sep.psf_extract(
+        data, 5.0, psf, var=variance, normalize_snr=True
+    )
+
+The ``snr_bw``, ``snr_bh``, ``snr_fw``, ``snr_fh``, and ``snr_fthresh``
+arguments control the background mesh used for this normalization.
+
+For crowded fields where connected-component extraction may merge nearby
+sources, use `sep.psf_peaks` to find local maxima in the PSF-matched
+significance image:
+
+.. code-block:: python
+
+    peaks = sep.psf_peaks(data, 5.0, psf, var=variance)
+
+The returned table contains peak positions and S/N values, not connected
+object footprints. Use these candidates as inputs to PSF fitting or grouped
+deblending.
+
+Alternatively, use ``mode="peaks"`` in `sep.psf_extract` to find local
+maxima and immediately prune them with PSF fits:
+
+.. code-block:: python
+
+    objects = sep.psf_extract(
+        data, 5.0, psf, var=variance, mode="peaks", fit_snr=5.0
+    )
+
+In this mode, the returned table contains fitted positions, fluxes, fitted
+S/N values, peak S/N values, peak pixel positions, and fit flags. Set
+``fit_snr=None`` to return the raw peak table without fitting.
+
 Building a PSF image model
 --------------------------
 

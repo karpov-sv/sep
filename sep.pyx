@@ -313,6 +313,8 @@ cdef extern from "sep.h":
     int sep_sum_psf(const sep_image *im, sep_psf *psf,
                     double x, double y, int id, short inflag,
                     double *sum, double *sumerr, double *area, short *flag)
+    int sep_psf_snr(const sep_image *im, sep_psf *psf, int local_bkg,
+                    double *out)
     int sep_psf_fit(const sep_image *im, sep_psf *psf,
                     double x, double y, int id, short inflag, int maxiter,
                     double *flux, double *fluxerr,
@@ -3276,6 +3278,413 @@ def model_psf(np.ndarray arr not None, x, y, flux, PSF psf not None):
         status = sep_set_psf(<void*>arr.data, dtype, w, h, psf.ptr,
                              xbuf[i], ybuf[i], fbuf[i])
         _assert_ok(status)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def psf_snr(np.ndarray data not None, PSF psf not None,
+            var=None, err=None, gain=None, np.ndarray mask=None,
+            double maskthresh=0.0, bint local_bkg=False):
+    """psf_snr(data, psf, var=None, err=None, gain=None, mask=None, maskthresh=0.0, local_bkg=False)
+
+    Compute a PSF-matched significance image.
+
+    At each image pixel, this evaluates the supplied PSF centered on that
+    pixel and returns ``sum(P * data / var) / sqrt(sum(P**2 / var))``.
+    Masked pixels and pixels with non-positive variance are ignored in each
+    local sum.
+
+    Parameters
+    ----------
+    data : `~numpy.ndarray`
+        2-d image array.
+    psf : `PSF`
+        PSF model.
+    var : float or `~numpy.ndarray`, optional
+        Variance (scalar or 2-d array). Mutually exclusive with ``err``.
+    err : float or `~numpy.ndarray`, optional
+        Standard deviation (scalar or 2-d array). Mutually exclusive
+        with ``var``.
+    gain : float, optional
+        Effective gain in electrons per data unit. If supplied, positive
+        pixel values add Poisson variance as in PSF photometry.
+    mask : `~numpy.ndarray`, optional
+        Mask array.
+    maskthresh : float, optional
+        Mask threshold.
+    local_bkg : bool, optional
+        If True, fit and remove a constant local background term within each
+        PSF footprint before computing the source significance.
+
+    Returns
+    -------
+    snr : `~numpy.ndarray`
+        PSF-matched significance image with dtype ``float64``.
+    """
+
+    cdef int status
+    cdef sep_image im
+    cdef np.ndarray[np.double_t, ndim=2, mode="c"] out
+
+    _parse_arrays(data, err, var, mask, None, &im)
+    im.maskthresh = maskthresh
+    if gain is not None:
+        im.gain = gain
+
+    out = np.empty((data.shape[0], data.shape[1]), dtype=np.float64)
+    status = sep_psf_snr(&im, psf.ptr, 1 if local_bkg else 0,
+                         <double*>out.data)
+    _assert_ok(status)
+    return out
+
+
+def _normalize_psf_snr(snr, mask, maskthresh, snr_bw, snr_bh, snr_fw, snr_fh,
+                       snr_fthresh):
+    snr_bkg = Background(snr, mask=mask, maskthresh=maskthresh,
+                         bw=snr_bw, bh=snr_bh, fw=snr_fw, fh=snr_fh,
+                         fthresh=snr_fthresh)
+    return (snr - snr_bkg.back(dtype=np.float64)) / snr_bkg.rms(dtype=np.float64)
+
+
+def _suppress_close_peaks(x, y, values, double min_distance):
+    if min_distance <= 0.0 or len(x) <= 1:
+        return np.arange(len(x), dtype=np.int64)
+
+    order = np.argsort(values)[::-1]
+    keep = []
+    grid = {}
+    cell = min_distance
+    min_distance2 = min_distance * min_distance
+
+    for idx in order:
+        xi = float(x[idx])
+        yi = float(y[idx])
+        gx = int(np.floor(xi / cell))
+        gy = int(np.floor(yi / cell))
+        accept = True
+
+        for ngx in range(gx - 1, gx + 2):
+            for ngy in range(gy - 1, gy + 2):
+                for kept_idx in grid.get((ngx, ngy), ()):
+                    dx = xi - float(x[kept_idx])
+                    dy = yi - float(y[kept_idx])
+                    if dx * dx + dy * dy <= min_distance2:
+                        accept = False
+                        break
+                if not accept:
+                    break
+            if not accept:
+                break
+
+        if accept:
+            keep.append(idx)
+            grid.setdefault((gx, gy), []).append(idx)
+
+    keep = np.asarray(keep, dtype=np.int64)
+    return keep[np.argsort(y[keep] * np.max(x + 1) + x[keep])]
+
+
+def psf_peaks(np.ndarray data not None, float thresh, PSF psf not None,
+              var=None, err=None, gain=None, np.ndarray mask=None,
+              double maskthresh=0.0, int maxfilter_size=3,
+              double min_distance=1.5, bint return_snr=False,
+              bint local_bkg=False, bint normalize_snr=False,
+              int snr_bw=64, int snr_bh=64, int snr_fw=3, int snr_fh=3,
+              float snr_fthresh=0.0):
+    """psf_peaks(data, thresh, psf, var=None, err=None, mask=None, ...)
+
+    Find local maxima in a PSF-matched significance image.
+
+    This is a peak-candidate detector for crowded fields. It computes
+    `psf_snr`, optionally normalizes that S/N image with `Background`, then
+    returns local maxima above ``thresh``. Unlike `psf_extract`, it does not
+    create connected-object footprints or deblend segmentation islands.
+
+    Parameters
+    ----------
+    data : `~numpy.ndarray`
+        2-d image array.
+    thresh : float
+        Peak threshold in PSF-matched S/N units.
+    psf : `PSF`
+        PSF model.
+    var, err, gain, mask, maskthresh, local_bkg
+        Passed through to `psf_snr`.
+    maxfilter_size : int, optional
+        Odd-sized square neighborhood used for local-maximum testing.
+        Default is 3.
+    min_distance : float, optional
+        Minimum distance in pixels between retained peaks. Peaks closer than
+        this are greedily suppressed in descending S/N order. Default is 1.5.
+    return_snr : bool, optional
+        If True, return the detection S/N image in addition to the peak table.
+    normalize_snr : bool, optional
+        If True, estimate and remove a spatial background from the
+        PSF-matched significance image, then divide by its background RMS
+        before finding peaks.
+    snr_bw, snr_bh, snr_fw, snr_fh, snr_fthresh : optional
+        Background mesh and filter parameters used for S/N-image
+        normalization when ``normalize_snr=True``.
+
+    Returns
+    -------
+    peaks : `~numpy.ndarray`
+        Record array with fields ``x``, ``y``, ``snr``, ``xpeak``, and
+        ``ypeak``.
+    snr : `~numpy.ndarray`, optional
+        Returned when ``return_snr=True``.
+    """
+
+    if maxfilter_size < 1 or maxfilter_size % 2 != 1:
+        raise ValueError("maxfilter_size must be a positive odd integer")
+
+    snr = psf_snr(data, psf, var=var, err=err, gain=gain,
+                  mask=mask, maskthresh=maskthresh, local_bkg=local_bkg)
+    if normalize_snr:
+        snr = _normalize_psf_snr(snr, mask, maskthresh, snr_bw, snr_bh,
+                                 snr_fw, snr_fh, snr_fthresh)
+
+    peaks = np.isfinite(snr) & (snr > thresh)
+    radius = maxfilter_size // 2
+    padded = np.pad(snr, radius, mode="constant", constant_values=-np.inf)
+    center = padded[radius:radius + snr.shape[0], radius:radius + snr.shape[1]]
+
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx == 0 and dy == 0:
+                continue
+            neighbor = padded[
+                radius + dy:radius + dy + snr.shape[0],
+                radius + dx:radius + dx + snr.shape[1],
+            ]
+            peaks &= center >= neighbor
+
+    ypeak, xpeak = np.nonzero(peaks)
+    values = snr[ypeak, xpeak]
+    keep = _suppress_close_peaks(xpeak, ypeak, values, min_distance)
+    xpeak = xpeak[keep]
+    ypeak = ypeak[keep]
+    values = values[keep]
+
+    result = np.empty(len(xpeak),
+                      dtype=np.dtype([('x', np.float64),
+                                      ('y', np.float64),
+                                      ('snr', np.float64),
+                                      ('xpeak', np.int64),
+                                      ('ypeak', np.int64)]))
+    result['x'] = xpeak.astype(np.float64)
+    result['y'] = ypeak.astype(np.float64)
+    result['snr'] = values
+    result['xpeak'] = xpeak
+    result['ypeak'] = ypeak
+
+    if return_snr:
+        return result, snr
+    return result
+
+
+def _empty_psf_peak_fit_catalog():
+    return np.empty(0, dtype=np.dtype([('x', np.float64),
+                                       ('y', np.float64),
+                                       ('flux', np.float64),
+                                       ('fluxerr', np.float64),
+                                       ('fit_snr', np.float64),
+                                       ('peak_snr', np.float64),
+                                       ('xpeak', np.int64),
+                                       ('ypeak', np.int64),
+                                       ('flag', np.short)]))
+
+
+def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
+                   var=None, err=None, gain=None, np.ndarray mask=None,
+                   double maskthresh=0.0, fit_snr=5.0,
+                   bint fit_positions=True, bint keep_flagged=False,
+                   int maxiter=20):
+    if len(peaks) == 0:
+        return _empty_psf_peak_fit_catalog()
+
+    flux, fluxerr, xfit, yfit, flag, _, _ = psf_fit(
+        data, peaks['x'], peaks['y'], psf, var=var, err=err, gain=gain,
+        mask=mask, maskthresh=maskthresh, maxiter=maxiter,
+        fit_positions=fit_positions,
+    )
+    fit_snr_values = flux / np.maximum(fluxerr, 1.0e-30)
+    keep = np.isfinite(fit_snr_values)
+    if fit_snr is not None:
+        keep &= fit_snr_values > fit_snr
+    if not keep_flagged:
+        keep &= flag == 0
+
+    result = np.empty(np.sum(keep),
+                      dtype=np.dtype([('x', np.float64),
+                                      ('y', np.float64),
+                                      ('flux', np.float64),
+                                      ('fluxerr', np.float64),
+                                      ('fit_snr', np.float64),
+                                      ('peak_snr', np.float64),
+                                      ('xpeak', np.int64),
+                                      ('ypeak', np.int64),
+                                      ('flag', np.short)]))
+    result['x'] = xfit[keep]
+    result['y'] = yfit[keep]
+    result['flux'] = flux[keep]
+    result['fluxerr'] = fluxerr[keep]
+    result['fit_snr'] = fit_snr_values[keep]
+    result['peak_snr'] = peaks['snr'][keep]
+    result['xpeak'] = peaks['xpeak'][keep]
+    result['ypeak'] = peaks['ypeak'][keep]
+    result['flag'] = flag[keep]
+    return result
+
+
+def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
+                var=None, err=None, gain=None, np.ndarray mask=None,
+                double maskthresh=0.0, int minarea=1,
+                int deblend_nthresh=32, double deblend_cont=0.005,
+                bint clean=True, double clean_param=1.0,
+                segmentation_map=False, bint return_snr=False,
+                bint local_bkg=False, bint normalize_snr=False,
+                int snr_bw=64, int snr_bh=64, int snr_fw=3, int snr_fh=3,
+                float snr_fthresh=0.0, mode="segments",
+                double peak_min_distance=1.5, int maxfilter_size=3,
+                fit_snr=5.0, bint fit_positions=True,
+                bint keep_flagged=False, int fit_maxiter=20):
+    """psf_extract(data, thresh, psf, var=None, err=None, mask=None, ...)
+
+    Extract sources from a PSF-matched significance image.
+
+    In ``mode='segments'`` (default), this is a convenience wrapper around
+    `psf_snr` and `extract`: it computes the PSF-matched significance image,
+    then runs connected-component source extraction on that image with no
+    additional filtering.
+
+    In ``mode='peaks'``, this finds local maxima in the PSF-matched
+    significance image with `psf_peaks`, then fits the PSF at those peak
+    positions and prunes by fitted S/N.
+
+    Parameters
+    ----------
+    data : `~numpy.ndarray`
+        2-d image array.
+    thresh : float
+        Detection threshold in PSF-matched S/N units.
+    psf : `PSF`
+        PSF model.
+    var : float or `~numpy.ndarray`, optional
+        Variance (scalar or 2-d array). Mutually exclusive with ``err``.
+    err : float or `~numpy.ndarray`, optional
+        Standard deviation (scalar or 2-d array). Mutually exclusive
+        with ``var``.
+    gain : float, optional
+        Effective gain in electrons per data unit.
+    mask : `~numpy.ndarray`, optional
+        Mask array. The mask is used both while computing the significance
+        image and while extracting detections from it.
+    maskthresh : float, optional
+        Mask threshold.
+    minarea : int, optional
+        Minimum number of connected pixels above threshold in the significance
+        image. Default is 1.
+    deblend_nthresh, deblend_cont, clean, clean_param, segmentation_map
+        Passed through to `extract`.
+    return_snr : bool, optional
+        If True, return the PSF-matched significance image in addition to the
+        extraction result.
+    local_bkg : bool, optional
+        If True, compute the detection image with `psf_snr(...,
+        local_bkg=True)`.
+    normalize_snr : bool, optional
+        If True, estimate and remove a spatial background from the
+        PSF-matched significance image, then divide by its background RMS
+        before extracting detections.
+    snr_bw, snr_bh, snr_fw, snr_fh, snr_fthresh : optional
+        Background mesh and filter parameters used for S/N-image
+        normalization when ``normalize_snr=True``.
+    mode : {'segments', 'peaks'}, optional
+        Detection mode. ``'segments'`` uses connected-component extraction.
+        ``'peaks'`` uses local maxima followed by PSF-fit pruning.
+    peak_min_distance : float, optional
+        Minimum distance between local maxima in ``mode='peaks'``.
+    maxfilter_size : int, optional
+        Odd-sized local-maximum neighborhood in ``mode='peaks'``.
+    fit_snr : float or None, optional
+        Minimum fitted ``flux / fluxerr`` retained in ``mode='peaks'``.
+        Set to None to return unfit peak candidates. Default is 5.0.
+    fit_positions, keep_flagged, fit_maxiter : optional
+        PSF fitting controls used in ``mode='peaks'``.
+
+    Returns
+    -------
+    objects : `~numpy.ndarray`
+        Extracted object catalog from the PSF-matched significance image in
+        ``mode='segments'``. In ``mode='peaks'``, the returned table contains
+        fitted positions, fluxes, fitted S/N, peak S/N, peak pixel positions,
+        and fit flags. If ``fit_snr=None``, it contains the raw peak table
+        returned by `psf_peaks`.
+    segmap : `~numpy.ndarray`, optional
+        Returned when ``segmentation_map=True``.
+    snr : `~numpy.ndarray`, optional
+        Returned when ``return_snr=True``.
+    """
+
+    if mode == "peaks":
+        if type(segmentation_map) is np.ndarray or segmentation_map:
+            raise ValueError("segmentation_map is not supported with mode='peaks'")
+        peak_result = psf_peaks(
+            data, thresh, psf, var=var, err=err, gain=gain, mask=mask,
+            maskthresh=maskthresh, maxfilter_size=maxfilter_size,
+            min_distance=peak_min_distance, return_snr=return_snr,
+            local_bkg=local_bkg, normalize_snr=normalize_snr, snr_bw=snr_bw,
+            snr_bh=snr_bh, snr_fw=snr_fw, snr_fh=snr_fh,
+            snr_fthresh=snr_fthresh,
+        )
+        if return_snr:
+            peaks, snr = peak_result
+        else:
+            peaks = peak_result
+        if fit_snr is None:
+            result = peaks
+        else:
+            result = _fit_psf_peaks(
+                data, peaks, psf, var=var, err=err, gain=gain, mask=mask,
+                maskthresh=maskthresh, fit_snr=fit_snr,
+                fit_positions=fit_positions, keep_flagged=keep_flagged,
+                maxiter=fit_maxiter,
+            )
+        if return_snr:
+            return result, snr
+        return result
+
+    if mode != "segments":
+        raise ValueError("mode must be 'segments' or 'peaks'")
+
+    snr = psf_snr(data, psf, var=var, err=err, gain=gain,
+                  mask=mask, maskthresh=maskthresh, local_bkg=local_bkg)
+    if normalize_snr:
+        snr = _normalize_psf_snr(snr, mask, maskthresh, snr_bw, snr_bh,
+                                 snr_fw, snr_fh, snr_fthresh)
+    result = extract(
+        snr,
+        thresh,
+        err=None,
+        var=None,
+        gain=None,
+        mask=mask,
+        maskthresh=maskthresh,
+        minarea=minarea,
+        filter_kernel=None,
+        deblend_nthresh=deblend_nthresh,
+        deblend_cont=deblend_cont,
+        clean=clean,
+        clean_param=clean_param,
+        segmentation_map=segmentation_map,
+    )
+    if return_snr:
+        if type(segmentation_map) is np.ndarray or segmentation_map:
+            objects, segmap = result
+            return objects, segmap, snr
+        return result, snr
+    return result
 
 
 @cython.boundscheck(False)

@@ -816,6 +816,25 @@ SEP_API int sep_sum_psf(
     short * flag
 );
 
+/* sep_psf_snr()
+ *
+ * Compute a PSF-matched significance image:
+ *   SNR(x,y) = sum(P*D/V) / sqrt(sum(P^2/V))
+ * where P is the PSF model centered at each output pixel.
+ * If local_bkg is nonzero, fit and remove a constant local background term
+ * within each PSF footprint.
+ *
+ * out must be a C-contiguous double array with dimensions im->h by im->w.
+ * Masked pixels and non-positive variance pixels are excluded from each local
+ * sum. Positions with no usable PSF support are set to 0.
+ */
+SEP_API int sep_psf_snr(
+    const sep_image * im,
+    sep_psf * psf,
+    int local_bkg,
+    double * out
+);
+
 /* sep_psf_fit()
  *
  * Iterative PSF fitting for a single source. Fits flux and position
