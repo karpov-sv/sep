@@ -555,6 +555,34 @@ def test_extract_matched_filter_at_edge():
     assert objects["npix"][0] == 6
 
 
+def test_extract_matched_filter_with_scalar_noise_and_mask():
+    """
+    Masked pixels are omitted from matched-filter normalization even when the
+    supplied noise is scalar.
+    """
+    data = np.zeros((15, 15), dtype=np.float64)
+    mask = np.zeros_like(data, dtype=np.uint8)
+    kernel = np.ones((3, 3), dtype=np.float64)
+
+    data[6:9, 6:9] = 1.0
+    mask[7, 7] = 1
+
+    objects = sep.extract(
+        data,
+        2.5,
+        err=1.0,
+        mask=mask,
+        minarea=1,
+        filter_kernel=kernel,
+        filter_type="matched",
+        deblend_cont=1.0,
+    )
+
+    assert len(objects) == 1
+    assert abs(objects["x"][0] - 7.0) < 1.0
+    assert abs(objects["y"][0] - 7.0) < 1.0
+
+
 @pytest.mark.skipif(NO_FITS, reason="no FITS reader")
 def test_extract_with_mask():
     """

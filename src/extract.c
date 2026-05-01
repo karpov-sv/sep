@@ -427,6 +427,7 @@ int sep_extract_with_pixels(
   int64_t prevpix, bufh;
   int64_t stacksize, convn;
   int status, isvarthresh, isvarnoise, luflag;
+  int use_mask_matched_noise, nbuf_initialized;
   short trunflag;
   PIXTYPE relthresh, cdnewsymbol, pixvar, pixsig;
   float sum;
@@ -438,6 +439,7 @@ int sep_extract_with_pixels(
   char * marker;
   PIXTYPE *scan, *cdscan, *wscan, *dummyscan, *sscan;
   PIXTYPE *sigscan, *workscan;
+  PIXTYPE *matched_noise;
   float * convnorm;
   int64_t *start, *end, *cumcounts;
   int * survives;
@@ -451,6 +453,7 @@ int sep_extract_with_pixels(
   convnorm = NULL;
   scan = wscan = cdscan = dummyscan = sscan = NULL;
   sigscan = workscan = NULL;
+  matched_noise = NULL;
   info = NULL;
   store = NULL;
   idinfo = NULL;
@@ -473,6 +476,8 @@ int sep_extract_with_pixels(
   pixvar = 0.0;
   pixsig = 0.0;
   isvarnoise = 0;
+  use_mask_matched_noise = 0;
+  nbuf_initialized = 0;
   memset(&deblendctx, 0, sizeof(deblendctx));
 
   mem_pixstack = sep_get_extract_pixstack();
@@ -512,6 +517,18 @@ int sep_extract_with_pixels(
   } else {
     /* noise is variable; we deal with setting pixvar and pixsig at each
      * pixel. */
+    isvarnoise = 1;
+  }
+
+  /* A masked matched filter can treat masked pixels as infinite-noise pixels.
+   * For scalar noise, build a temporary constant-noise image so masking can
+   * update the local matched-filter normalization exactly as it does for
+   * variable noise arrays.
+   */
+  if (conv && image->mask && filter_type == SEP_FILTER_MATCHED
+      && image->noise_type != SEP_NOISE_NONE && image->noise == NULL)
+  {
+    use_mask_matched_noise = 1;
     isvarnoise = 1;
   }
 
@@ -559,12 +576,25 @@ int sep_extract_with_pixels(
   if (status != RETURN_OK) {
     goto exit;
   }
-  if (isvarnoise) {
+  if (use_mask_matched_noise) {
+    QMALLOC(matched_noise, PIXTYPE, w * h, status);
+    for (i = 0; i < w * h; i++) {
+      matched_noise[i] = (image->noise_type == SEP_NOISE_VAR) ? pixvar : pixsig;
+    }
+    status = arraybuffer_init(
+        &nbuf, (const BYTE *)matched_noise, PIXDTYPE, w, h, stacksize, bufh
+    );
+    if (status != RETURN_OK) {
+      goto exit;
+    }
+    nbuf_initialized = 1;
+  } else if (isvarnoise) {
     status =
         arraybuffer_init(&nbuf, image->noise, image->ndtype, w, h, stacksize, bufh);
     if (status != RETURN_OK) {
       goto exit;
     }
+    nbuf_initialized = 1;
   }
   if (image->mask) {
     status = arraybuffer_init(&mbuf, image->mask, image->mdtype, w, h, stacksize, bufh);
@@ -640,7 +670,7 @@ int sep_extract_with_pixels(
   PLIST(pixt, nextpix) = -1;
 
   /* can only use a matched filter when convolving and when there is a noise
-   * array */
+   * array, real or synthetic */
   if (!(conv && isvarnoise)) {
     filter_type = SEP_FILTER_CONV;
   }
@@ -1044,9 +1074,10 @@ exit:
   free(end);
   free(survives);
   arraybuffer_free(&dbuf);
-  if (image->noise) {
+  if (nbuf_initialized) {
     arraybuffer_free(&nbuf);
   }
+  free(matched_noise);
   if (image->mask) {
     arraybuffer_free(&mbuf);
   }
