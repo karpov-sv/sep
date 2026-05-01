@@ -3490,23 +3490,156 @@ def _empty_psf_peak_fit_catalog():
                                        ('fluxerr', np.float64),
                                        ('fit_snr', np.float64),
                                        ('peak_snr', np.float64),
+                                       ('qf', np.float64),
+                                       ('rchi2', np.float64),
+                                       ('fracflux', np.float64),
                                        ('xpeak', np.int64),
                                        ('ypeak', np.int64),
+                                       ('chi2', np.float64),
+                                       ('niter', np.int64),
                                        ('flag', np.short)]))
+
+
+def _psf_peak_quality(np.ndarray data not None, PSF psf not None,
+                      xfit, yfit, flux, keep,
+                      var=None, err=None, gain=None,
+                      np.ndarray mask=None, double maskthresh=0.0):
+    cdef object data_arr
+    cdef object model
+    cdef object stamp
+    cdef object source_model
+    cdef object raw
+    cdef object neighbor_sub
+    cdef object variance
+    cdef object valid
+    cdef object psfw
+    cdef int rw = psf.stamp_width
+    cdef int rh = psf.stamp_height
+    cdef int halfw = rw // 2
+    cdef int halfh = rh // 2
+    cdef Py_ssize_t n = len(xfit)
+    cdef Py_ssize_t nkeep = int(np.sum(keep))
+    cdef Py_ssize_t outidx = 0
+    cdef Py_ssize_t i
+    cdef int ix, iy, x0, x1, y0, y1, sx0, sx1, sy0, sy1
+    cdef double dx, dy, psfsum, qf_val, denom, numer, rawsum, invvar
+    cdef np.ndarray qf = np.zeros(nkeep, dtype=np.float64)
+    cdef np.ndarray rchi2 = np.full(nkeep, np.nan, dtype=np.float64)
+    cdef np.ndarray fracflux = np.full(nkeep, np.nan, dtype=np.float64)
+
+    data_arr = np.ascontiguousarray(data, dtype=np.float64)
+    model = np.zeros(data_arr.shape, dtype=np.float64)
+
+    all_good = np.isfinite(flux) & np.isfinite(xfit) & np.isfinite(yfit)
+    if np.any(all_good):
+        model_psf(model, xfit[all_good], yfit[all_good], flux[all_good], psf)
+
+    for i in range(n):
+        if not keep[i]:
+            continue
+
+        ix = int(xfit[i] + 0.5)
+        iy = int(yfit[i] + 0.5)
+        dx = xfit[i] - ix
+        dy = yfit[i] - iy
+
+        stamp = np.zeros((rh, rw), dtype=np.float64)
+        model_psf(stamp, [halfw + dx], [halfh + dy], [1.0], psf)
+
+        x0 = ix - halfw
+        y0 = iy - halfh
+        x1 = x0 + rw
+        y1 = y0 + rh
+        sx0 = sy0 = 0
+        sx1 = rw
+        sy1 = rh
+        if x0 < 0:
+            sx0 = -x0
+            x0 = 0
+        if y0 < 0:
+            sy0 = -y0
+            y0 = 0
+        if x1 > data_arr.shape[1]:
+            sx1 -= x1 - data_arr.shape[1]
+            x1 = data_arr.shape[1]
+        if y1 > data_arr.shape[0]:
+            sy1 -= y1 - data_arr.shape[0]
+            y1 = data_arr.shape[0]
+
+        if x0 >= x1 or y0 >= y1:
+            outidx += 1
+            continue
+
+        psfw = stamp[sy0:sy1, sx0:sx1]
+        psfsum = float(np.sum(stamp))
+        if psfsum <= 0.0:
+            outidx += 1
+            continue
+        psfw = psfw / psfsum
+
+        raw = data_arr[y0:y1, x0:x1]
+        source_model = flux[i] * psfw
+        neighbor_sub = raw - (model[y0:y1, x0:x1] - source_model)
+
+        if var is not None:
+            if np.ndim(var) == 0:
+                variance = np.full(raw.shape, float(var), dtype=np.float64)
+            else:
+                variance = np.asarray(var, dtype=np.float64)[y0:y1, x0:x1].copy()
+        elif err is not None:
+            if np.ndim(err) == 0:
+                variance = np.full(raw.shape, float(err) * float(err),
+                                   dtype=np.float64)
+            else:
+                variance = np.asarray(err, dtype=np.float64)[y0:y1, x0:x1] ** 2
+        else:
+            variance = np.ones(raw.shape, dtype=np.float64)
+
+        if gain is not None and gain > 0.0:
+            variance = variance + np.maximum(raw, 0.0) / gain
+
+        valid = np.isfinite(raw) & np.isfinite(variance) & (variance > 0.0)
+        if mask is not None:
+            valid &= np.asarray(mask)[y0:y1, x0:x1] <= maskthresh
+
+        qf_val = float(np.sum(psfw[valid]))
+        qf[outidx] = qf_val
+        if qf_val > 0.0:
+            numer = 0.0
+            for resid, vv, pw in zip(
+                    (neighbor_sub[valid] - source_model[valid]).ravel(),
+                    variance[valid].ravel(), psfw[valid].ravel()):
+                invvar = 1.0 / float(vv)
+                numer += float(resid) * float(resid) * invvar * float(pw)
+            rchi2[outidx] = numer / qf_val
+
+            denom = float(np.sum(raw[valid] * psfw[valid]))
+            rawsum = denom
+            if rawsum != 0.0:
+                fracflux[outidx] = (
+                    float(np.sum(neighbor_sub[valid] * psfw[valid])) / rawsum
+                )
+
+        outidx += 1
+
+    return qf, rchi2, fracflux
 
 
 def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
                    var=None, err=None, gain=None, np.ndarray mask=None,
                    double maskthresh=0.0, fit_snr=5.0,
                    bint fit_positions=True, bint keep_flagged=False,
-                   int maxiter=20):
+                   int maxiter=20, bint grouped=False,
+                   double group_factor=2.0, min_qf=None,
+                   max_rchi2=None, min_fracflux=None):
     if len(peaks) == 0:
         return _empty_psf_peak_fit_catalog()
 
-    flux, fluxerr, xfit, yfit, flag, _, _ = psf_fit(
+    flux, fluxerr, xfit, yfit, flag, chi2, niter = psf_fit(
         data, peaks['x'], peaks['y'], psf, var=var, err=err, gain=gain,
         mask=mask, maskthresh=maskthresh, maxiter=maxiter,
-        fit_positions=fit_positions,
+        fit_positions=fit_positions, grouped=grouped,
+        group_factor=group_factor,
     )
     fit_snr_values = flux / np.maximum(fluxerr, 1.0e-30)
     keep = np.isfinite(fit_snr_values)
@@ -3514,6 +3647,23 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
         keep &= fit_snr_values > fit_snr
     if not keep_flagged:
         keep &= flag == 0
+    qf, rchi2, fracflux = _psf_peak_quality(
+        data, psf, xfit, yfit, flux, keep, var=var, err=err, gain=gain,
+        mask=mask, maskthresh=maskthresh)
+    quality_keep = np.ones(len(qf), dtype=bool)
+    if min_qf is not None:
+        quality_keep &= qf >= min_qf
+    if max_rchi2 is not None:
+        quality_keep &= rchi2 <= max_rchi2
+    if min_fracflux is not None:
+        quality_keep &= fracflux >= min_fracflux
+    if not np.all(quality_keep):
+        kept_idx = np.flatnonzero(keep)
+        keep = np.zeros_like(keep, dtype=bool)
+        keep[kept_idx[quality_keep]] = True
+        qf = qf[quality_keep]
+        rchi2 = rchi2[quality_keep]
+        fracflux = fracflux[quality_keep]
 
     result = np.empty(np.sum(keep),
                       dtype=np.dtype([('x', np.float64),
@@ -3522,8 +3672,13 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
                                       ('fluxerr', np.float64),
                                       ('fit_snr', np.float64),
                                       ('peak_snr', np.float64),
+                                      ('qf', np.float64),
+                                      ('rchi2', np.float64),
+                                      ('fracflux', np.float64),
                                       ('xpeak', np.int64),
                                       ('ypeak', np.int64),
+                                      ('chi2', np.float64),
+                                      ('niter', np.int64),
                                       ('flag', np.short)]))
     result['x'] = xfit[keep]
     result['y'] = yfit[keep]
@@ -3531,8 +3686,13 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
     result['fluxerr'] = fluxerr[keep]
     result['fit_snr'] = fit_snr_values[keep]
     result['peak_snr'] = peaks['snr'][keep]
+    result['qf'] = qf
+    result['rchi2'] = rchi2
+    result['fracflux'] = fracflux
     result['xpeak'] = peaks['xpeak'][keep]
     result['ypeak'] = peaks['ypeak'][keep]
+    result['chi2'] = chi2[keep]
+    result['niter'] = niter[keep]
     result['flag'] = flag[keep]
     return result
 
@@ -3548,7 +3708,9 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
                 float snr_fthresh=0.0, mode="segments",
                 double peak_min_distance=1.5, int maxfilter_size=3,
                 fit_snr=5.0, bint fit_positions=True,
-                bint keep_flagged=False, int fit_maxiter=20):
+                bint keep_flagged=False, int fit_maxiter=20,
+                bint grouped=False, double group_factor=2.0,
+                min_qf=None, max_rchi2=None, min_fracflux=None):
     """psf_extract(data, thresh, psf, var=None, err=None, mask=None, ...)
 
     Extract sources from a PSF-matched significance image.
@@ -3612,6 +3774,14 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
         Set to None to return unfit peak candidates. Default is 5.0.
     fit_positions, keep_flagged, fit_maxiter : optional
         PSF fitting controls used in ``mode='peaks'``.
+    grouped : bool, optional
+        If True in ``mode='peaks'``, fit overlapping peak candidates
+        simultaneously before applying fitted-S/N pruning.
+    group_factor : float, optional
+        Grouping radius factor passed to `psf_fit` when ``grouped=True``.
+    min_qf, max_rchi2, min_fracflux : float or None, optional
+        Optional quality cuts applied in ``mode='peaks'`` after PSF fitting
+        and diagnostic computation. By default, no quality cuts are applied.
 
     Returns
     -------
@@ -3619,7 +3789,8 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
         Extracted object catalog from the PSF-matched significance image in
         ``mode='segments'``. In ``mode='peaks'``, the returned table contains
         fitted positions, fluxes, fitted S/N, peak S/N, peak pixel positions,
-        and fit flags. If ``fit_snr=None``, it contains the raw peak table
+        PSF-weighted fit diagnostics, fit chi-square, iteration counts, and
+        fit flags. If ``fit_snr=None``, it contains the raw peak table
         returned by `psf_peaks`.
     segmap : `~numpy.ndarray`, optional
         Returned when ``segmentation_map=True``.
@@ -3649,7 +3820,9 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
                 data, peaks, psf, var=var, err=err, gain=gain, mask=mask,
                 maskthresh=maskthresh, fit_snr=fit_snr,
                 fit_positions=fit_positions, keep_flagged=keep_flagged,
-                maxiter=fit_maxiter,
+                maxiter=fit_maxiter, grouped=grouped,
+                group_factor=group_factor, min_qf=min_qf,
+                max_rchi2=max_rchi2, min_fracflux=min_fracflux,
             )
         if return_snr:
             return result, snr

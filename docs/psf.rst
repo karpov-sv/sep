@@ -161,8 +161,25 @@ maxima and immediately prune them with PSF fits:
     )
 
 In this mode, the returned table contains fitted positions, fluxes, fitted
-S/N values, peak S/N values, peak pixel positions, and fit flags. Set
-``fit_snr=None`` to return the raw peak table without fitting.
+S/N values, peak S/N values, PSF-weighted quality diagnostics (``qf``,
+``rchi2``, and ``fracflux``), peak pixel positions, fit chi-square values,
+iteration counts, and fit flags. Set ``fit_snr=None`` to return the raw peak
+table without fitting.
+
+The fitted peak catalog may also be pruned with optional quality cuts:
+``min_qf`` rejects incomplete PSF footprints, ``max_rchi2`` rejects poor PSF
+fits, and ``min_fracflux`` rejects candidates whose fitted source model
+accounts for only a small fraction of the local PSF-weighted flux.
+
+Set ``grouped=True`` to fit overlapping peak candidates simultaneously before
+applying the fitted-S/N cut:
+
+.. code-block:: python
+
+    objects = sep.psf_extract(
+        data, 5.0, psf, var=variance, mode="peaks",
+        fit_snr=5.0, grouped=True
+    )
 
 Building a PSF image model
 --------------------------

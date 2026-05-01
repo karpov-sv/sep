@@ -2091,14 +2091,24 @@ def test_psf_extract_peaks_mode_returns_fit_catalog():
         "fluxerr",
         "fit_snr",
         "peak_snr",
+        "qf",
+        "rchi2",
+        "fracflux",
         "xpeak",
         "ypeak",
+        "chi2",
+        "niter",
         "flag",
     )
     assert len(objects) == 1
     assert_allclose(objects["x"][0], 25.0, atol=0.1)
     assert_allclose(objects["y"][0], 28.0, atol=0.1)
     assert objects["fit_snr"][0] > 8.0
+    assert_allclose(objects["qf"][0], 1.0, rtol=1e-6)
+    assert objects["rchi2"][0] < 1e-10
+    assert_allclose(objects["fracflux"][0], 1.0, rtol=1e-6)
+    assert np.isfinite(objects["chi2"][0])
+    assert objects["niter"][0] >= 1
 
 
 def test_psf_extract_peaks_mode_can_return_raw_peaks():
@@ -2125,6 +2135,106 @@ def test_psf_extract_peaks_mode_rejects_segmentation_map():
 
     with pytest.raises(ValueError, match="segmentation_map"):
         sep.psf_extract(data, 5.0, psf, var=25.0, mode="peaks", segmentation_map=True)
+
+
+def test_psf_extract_peaks_mode_grouped_reduces_blend_bias():
+    """Grouped peak-mode fits reduce independent-fit bias for close pairs."""
+    psf = sep.PSF.from_gaussian(fwhm=2.0)
+    data = np.zeros((80, 80), dtype=np.float64)
+    x = np.array([38.0, 42.0])
+    y = np.array([40.0, 40.0])
+    true_flux = np.array([300.0, 260.0])
+    sep.model_psf(data, x, y, true_flux, psf)
+
+    independent = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, grouped=False, peak_min_distance=0.0
+    )
+    grouped = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, grouped=True, group_factor=5.0,
+        peak_min_distance=0.0
+    )
+
+    assert len(independent) == 2
+    assert len(grouped) == 2
+    err_independent = np.sum(np.abs(independent["flux"] - true_flux))
+    err_grouped = np.sum(np.abs(grouped["flux"] - true_flux))
+    assert err_grouped < 0.01 * err_independent
+    assert np.all(grouped["qf"] > 0.99)
+    assert np.all(grouped["fracflux"] < 1.0)
+    assert np.all(grouped["fracflux"] > 0.98)
+
+
+def test_psf_extract_peaks_mode_applies_quality_cuts():
+    """Peak-mode quality cuts prune fitted candidates."""
+    psf = sep.PSF.from_gaussian(fwhm=2.0)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(
+        data, [38.0, 42.0], [40.0, 40.0], [300.0, 260.0], psf
+    )
+
+    loose = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, grouped=True, group_factor=5.0,
+        peak_min_distance=0.0, min_fracflux=0.98
+    )
+    strict = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, grouped=True, group_factor=5.0,
+        peak_min_distance=0.0, min_fracflux=0.995
+    )
+
+    assert len(loose) == 2
+    assert len(strict) == 0
+
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(data, [25.0], [28.0], [1000.0], psf)
+    data[28, 30] += 200.0
+
+    accepted = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, peak_min_distance=0.0, max_rchi2=0.6
+    )
+    rejected = sep.psf_extract(
+        data, 5.0, psf, var=25.0, mode="peaks", fit_snr=0.0,
+        fit_positions=False, peak_min_distance=0.0, max_rchi2=0.5
+    )
+
+    assert len(accepted) == 1
+    assert accepted["rchi2"][0] > 0.5
+    assert len(rejected) == 0
+
+
+def test_fit_psf_peaks_applies_qf_cut():
+    """The fitted peak helper can reject incomplete PSF footprints."""
+    psf = sep.PSF.from_gaussian(fwhm=3.5)
+    data = np.zeros((80, 80), dtype=np.float64)
+    sep.model_psf(data, [6.0], [6.0], [1000.0], psf)
+    peaks = np.array(
+        [(6.0, 6.0, 50.0, 6, 6)],
+        dtype=[
+            ("x", np.float64),
+            ("y", np.float64),
+            ("snr", np.float64),
+            ("xpeak", np.int64),
+            ("ypeak", np.int64),
+        ],
+    )
+
+    loose = sep._fit_psf_peaks(
+        data, peaks, psf, var=25.0, fit_snr=0.0, fit_positions=False,
+        keep_flagged=True, min_qf=0.9999
+    )
+    strict = sep._fit_psf_peaks(
+        data, peaks, psf, var=25.0, fit_snr=0.0, fit_positions=False,
+        keep_flagged=True, min_qf=0.99999
+    )
+
+    assert len(loose) == 1
+    assert loose["qf"][0] < 1.0
+    assert len(strict) == 0
 
 
 def test_psf_fit_exact_center():
