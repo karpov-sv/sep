@@ -71,7 +71,9 @@ static void build_interp_lut(float *lut, int size) {
 /*--------------------------------------------------------------------------*/
 /* Constants for PSF fitting                                                */
 /*--------------------------------------------------------------------------*/
-#define PSF_MINSHIFT 1e-3 /* convergence threshold (pixels) */
+#define PSF_MINSHIFT_FLOOR 1.0e-3 /* minimum convergence threshold (pixels) */
+#define PSF_MINSHIFT_REL_FWHM 5.0e-3
+#define PSF_MINSHIFT_CAP 1.0e-2 /* maximum convergence threshold (pixels) */
 #define PSF_NA 3          /* parameters per component: flux, dx, dy */
 #define PSF_GROUP_EXACT_MAX 64
 #define PSF_GROUP_CORE 16
@@ -83,6 +85,18 @@ static void build_interp_lut(float *lut, int size) {
 #define PSF_FLUX_NNLS_TOL 1.0e-10
 #define PSF_LOCAL_REFIT_MAX 8
 #define PSF_GROUP_INFLUENCE_REL 1.0e-2
+
+static double psf_position_convergence_tol2(const sep_psf *psf) {
+  double tol = PSF_MINSHIFT_CAP;
+
+  if (psf && psf->fwhm > 0.0) {
+    tol = PSF_MINSHIFT_REL_FWHM * psf->fwhm;
+    if (tol < PSF_MINSHIFT_FLOOR) tol = PSF_MINSHIFT_FLOOR;
+    if (tol > PSF_MINSHIFT_CAP) tol = PSF_MINSHIFT_CAP;
+  }
+
+  return tol * tol;
+}
 
 /*--------------------------------------------------------------------------*/
 /* SVD solver macros (from SExtractor psf.c, Numerical Recipes)             */
@@ -2255,7 +2269,7 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
   double *sol, *vmat, *wmat, *covmat;
   double *rv1, *tmp;
   double pix, varpix, dx_update, dy_update;
-  double radmax2, fit_r2, damp_pos;
+  double radmax2, fit_r2, damp_pos, conv_tol2;
   int damp_active;
   converter convert, econvert, mconvert, sconvert;
   int64_t size, esize, msize, ssize;
@@ -2282,6 +2296,7 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
 
   radmax2 = (double)(width / 2) * (width / 2);
   fit_r2 = (psf->fit_radius > 0.0) ? psf->fit_radius * psf->fit_radius : 0.0;
+  conv_tol2 = psf_position_convergence_tol2(psf);
 
   /* Convert S/N threshold to position damping strength:
    * damp_pos = (damp_snthresh / sigma_psf)^2  where sigma_psf = fwhm/2.3548 */
@@ -2458,7 +2473,7 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
     {
       double ata[PSF_NA * PSF_NA];
       double atb[PSF_NA];
-      int p, a, b;
+      int p;
       const double *col0 = mat;
       const double *col1 = mat + npix;
       const double *col2 = mat + 2 * npix;
@@ -2557,8 +2572,7 @@ int sep_psf_fit(const sep_image *im, sep_psf *psf, double x, double y, int id,
     deltay += dy_update;
 
     /* Check convergence */
-    if (dx_update * dx_update + dy_update * dy_update >
-        PSF_MINSHIFT * PSF_MINSHIFT) {
+    if (dx_update * dx_update + dy_update * dy_update > conv_tol2) {
       convflag = 1;
     }
 
@@ -2851,6 +2865,7 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
     int errisarray, errisstd;
     double vp;
     double radmax2 = (double)(width / 2) * (width / 2);
+    double conv_tol2 = psf_position_convergence_tol2(psf);
 
     used_svd_last = 0;
 
@@ -3056,12 +3071,18 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
       }
     }
 
-    /* Initialize fluxes with a non-negative flux-only solve at fixed positions.
-     * This gives the full grouped fit a stable starting point in close blends. */
-    status = psf_fit_flux_subset(im, psf, x, y, id, gcount, gidx, fixed_idx,
-                                 fixed_count, fixed_x, fixed_y, fixed_flux, ws,
-                                 pflux, pfluxerr, pflag);
-    if (status != RETURN_OK) return status;
+    /* Initialize fluxes only when position damping needs a flux scale.
+     * Without damping, the grouped normal-equation solve does not use the
+     * incoming pflux values, and final non-negative fluxes are re-solved after
+     * positions converge.  Skipping this duplicate NNLS pass is important for
+     * the many small exact groups in crowded peak catalogs.
+     */
+    if (damp_pos > 0.0) {
+      status = psf_fit_flux_subset(im, psf, x, y, id, gcount, gidx, fixed_idx,
+                                   fixed_count, fixed_x, fixed_y, fixed_flux,
+                                   ws, pflux, pfluxerr, pflag);
+      if (status != RETURN_OK) return status;
+    }
     memset(deltax_arr, 0, (size_t)gcount * sizeof(double));
     memset(deltay_arr, 0, (size_t)gcount * sizeof(double));
 
@@ -3254,7 +3275,7 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
         }
         pflux[idx] = fi;
 
-        if (dx * dx + dy * dy > PSF_MINSHIFT * PSF_MINSHIFT) {
+        if (dx * dx + dy * dy > conv_tol2) {
           convflag = 1;
         }
       }
