@@ -1199,6 +1199,32 @@ static int psf_cholesky_inverse(const double *l, int n, double *inv,
   return RETURN_OK;
 }
 
+/* Diagonal of inverse SPD matrix from Cholesky factor L (L * L^T = A).
+ * For each unit vector e_j, solve L y = e_j.  A^-1[j,j] = y^T y. */
+static int psf_cholesky_inverse_diag(const double *l, int n, double *diag,
+                                     double *work) {
+  int i, j, k;
+
+  for (j = 0; j < n; j++) {
+    double sumdiag = 0.0;
+
+    for (i = 0; i < n; i++) work[i] = 0.0;
+    work[j] = 1.0 / l[j * n + j];
+    sumdiag += work[j] * work[j];
+
+    for (i = j + 1; i < n; i++) {
+      double sum = 0.0;
+      for (k = j; k < i; k++) sum -= l[i * n + k] * work[k];
+      work[i] = sum / l[i * n + i];
+      sumdiag += work[i] * work[i];
+    }
+
+    diag[j] = sumdiag;
+  }
+
+  return RETURN_OK;
+}
+
 static int psf_flux_nnls(const double *ata, const double *atb, int n,
                          double *x) {
   double max_rhs = 0.0;
@@ -3304,7 +3330,7 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
     if (used_svd_last) {
       status = svdvar(gvmat, gwmat, npar, gcovmat);
     } else {
-      status = psf_cholesky_inverse(gvmat, npar, gcovmat, gwmat, gtmp);
+      status = psf_cholesky_inverse_diag(gvmat, npar, gcovmat, gtmp);
     }
     if (status == RETURN_OK) {
       for (i = 0; i < gcount; i++) {
@@ -3312,8 +3338,10 @@ static int psf_fit_subset(const sep_image *im, sep_psf *psf, const double *x,
         int base = i * PSF_NA;
         if (fabs(pflux[idx]) > 0.0) {
           double f2 = pflux[idx] * pflux[idx];
-          double vx = gcovmat[(base + 1) * npar + (base + 1)];
-          double vy = gcovmat[(base + 2) * npar + (base + 2)];
+          double vx = used_svd_last ? gcovmat[(base + 1) * npar + (base + 1)]
+                                    : gcovmat[base + 1];
+          double vy = used_svd_last ? gcovmat[(base + 2) * npar + (base + 2)]
+                                    : gcovmat[base + 2];
           pxerr[idx] = sqrt(vx > 0.0 ? vx / f2 : 0.0);
           pyerr[idx] = sqrt(vy > 0.0 ? vy / f2 : 0.0);
         } else {
@@ -3591,7 +3619,7 @@ static int psf_fit_flux_subset(const sep_image *im, sep_psf *psf,
 
     status = psf_cholesky_factor(active_l, nactive);
     if (status == RETURN_OK) {
-      status = psf_cholesky_inverse(active_l, nactive, gata, gatb, active_tmp);
+      status = psf_cholesky_inverse_diag(active_l, nactive, gata, active_tmp);
       if (status != RETURN_OK) return status;
     } else {
       nactive = 0;
@@ -3607,7 +3635,7 @@ static int psf_fit_flux_subset(const sep_image *im, sep_psf *psf,
     if (pflux[idx] > 0.0) {
       int ai = iyoff[i];
       if (nactive > 0 && ai >= 0) {
-        var_f = gata[ai * nactive + ai];
+        var_f = gata[ai];
       }
       if (var_f == 0.0 && diagata[i] > 0.0) {
         var_f = 1.0 / diagata[i];
