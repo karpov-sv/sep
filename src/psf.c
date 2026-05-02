@@ -1555,6 +1555,161 @@ int sep_psf_snr(const sep_image *im, sep_psf *psf, int local_bkg,
       scalar_var = errisstd ? im->noiseval * im->noiseval : im->noiseval;
     }
 
+    if (!local_bkg && !im->mask && !errisarray && im->gain <= 0.0) {
+      double invvar, den_full = 0.0;
+      int x_full0, x_full1, y_full0, y_full1;
+
+      if (scalar_var <= 0.0) {
+        for (pos = 0; pos < im->w * im->h; pos++) out[pos] = 0.0;
+        return status;
+      }
+      invvar = 1.0 / scalar_var;
+      for (pos = 0; pos < im->w * im->h; pos++) out[pos] = 0.0;
+
+      for (sy = 0; sy < psf->rh; sy++) {
+        int dy = sy - psf->rh / 2;
+        int y_start = dy < 0 ? -dy : 0;
+        int y_stop = im->h - dy;
+        if (y_stop > im->h) y_stop = im->h;
+        if (y_start >= y_stop) continue;
+
+        for (sx = 0; sx < psf->rw; sx++) {
+          double psfw = psf->resi[sy * psf->rw + sx];
+          int dx = sx - psf->rw / 2;
+          int x_start = dx < 0 ? -dx : 0;
+          int x_stop = im->w - dx;
+          if (x_stop > im->w) x_stop = im->w;
+          if (psfw == 0.0 || x_start >= x_stop) continue;
+
+          den_full += psfw * psfw * invvar;
+          for (iy0 = y_start; iy0 < y_stop; iy0++) {
+            int64_t inrow = (int64_t)(iy0 + dy) * im->w;
+            int64_t outrow = (int64_t)iy0 * im->w;
+            for (ix0 = x_start; ix0 < x_stop; ix0++) {
+              datat = (const char *)im->data + (inrow + ix0 + dx) * size;
+              out[outrow + ix0] += psfw * convert(datat) * invvar;
+            }
+          }
+        }
+      }
+
+      x_full0 = psf->rw / 2;
+      x_full1 = im->w - psf->rw + psf->rw / 2 + 1;
+      y_full0 = psf->rh / 2;
+      y_full1 = im->h - psf->rh + psf->rh / 2 + 1;
+
+      for (iy0 = 0; iy0 < im->h; iy0++) {
+        for (ix0 = 0; ix0 < im->w; ix0++) {
+          double den = den_full;
+          opos = (int64_t)iy0 * im->w + ix0;
+
+          if (ix0 < x_full0 || ix0 >= x_full1 ||
+              iy0 < y_full0 || iy0 >= y_full1) {
+            den = 0.0;
+            for (sy = 0; sy < psf->rh; sy++) {
+              imy = iy0 - psf->rh / 2 + sy;
+              if (imy < 0 || imy >= im->h) continue;
+              for (sx = 0; sx < psf->rw; sx++) {
+                double psfw = psf->resi[sy * psf->rw + sx];
+                imx = ix0 - psf->rw / 2 + sx;
+                if (imx < 0 || imx >= im->w) continue;
+                den += psfw * psfw * invvar;
+              }
+            }
+          }
+
+          out[opos] = den > 0.0 ? out[opos] / sqrt(den) : 0.0;
+        }
+      }
+
+      return status;
+    }
+
+    if (!local_bkg) {
+      size_t npix_img = (size_t)im->w * (size_t)im->h;
+      double *denimg = (double *)calloc(npix_img, sizeof(double));
+      double *wdata = (double *)calloc(npix_img, sizeof(double));
+      double *winv = (double *)calloc(npix_img, sizeof(double));
+      if (!denimg || !wdata || !winv) {
+        free(denimg);
+        free(wdata);
+        free(winv);
+        return MEMORY_ALLOC_ERROR;
+      }
+
+      for (pos = 0; pos < im->w * im->h; pos++) out[pos] = 0.0;
+
+      for (imy = 0; imy < im->h; imy++) {
+        for (imx = 0; imx < im->w; imx++) {
+          double pix, varpix, total_var, invvar;
+          int64_t inpos = imy * im->w + imx;
+
+          if (im->mask) {
+            maskt = (const char *)im->mask + inpos * msize;
+            if (mconvert(maskt) > im->maskthresh) continue;
+          }
+
+          datat = (const char *)im->data + inpos * size;
+          pix = convert(datat);
+
+          if (errisarray) {
+            errort = (const char *)im->noise + inpos * esize;
+            varpix = econvert(errort);
+            if (errisstd) varpix *= varpix;
+          } else {
+            varpix = scalar_var;
+          }
+          if (varpix <= 0.0) continue;
+
+          total_var = varpix;
+          if (im->gain > 0.0 && pix > 0.0) total_var += pix / im->gain;
+          if (total_var <= 0.0) continue;
+
+          invvar = 1.0 / total_var;
+          winv[inpos] = invvar;
+          wdata[inpos] = pix * invvar;
+        }
+      }
+
+      for (sy = 0; sy < psf->rh; sy++) {
+        int dy = sy - psf->rh / 2;
+        int y_start = dy < 0 ? -dy : 0;
+        int y_stop = im->h - dy;
+        if (y_stop > im->h) y_stop = im->h;
+        if (y_start >= y_stop) continue;
+
+        for (sx = 0; sx < psf->rw; sx++) {
+          double psfw = psf->resi[sy * psf->rw + sx];
+          double psfw2 = psfw * psfw;
+          int dx = sx - psf->rw / 2;
+          int x_start = dx < 0 ? -dx : 0;
+          int x_stop = im->w - dx;
+          if (x_stop > im->w) x_stop = im->w;
+          if (psfw == 0.0 || x_start >= x_stop) continue;
+
+          for (iy0 = y_start; iy0 < y_stop; iy0++) {
+            int64_t inrow = (int64_t)(iy0 + dy) * im->w;
+            int64_t outrow = (int64_t)iy0 * im->w;
+            for (ix0 = x_start; ix0 < x_stop; ix0++) {
+              int64_t inpos = inrow + ix0 + dx;
+              int64_t outpos = outrow + ix0;
+              out[outpos] += psfw * wdata[inpos];
+              denimg[outpos] += psfw2 * winv[inpos];
+            }
+          }
+        }
+      }
+
+      for (pos = 0; pos < im->w * im->h; pos++) {
+        out[pos] = denimg[pos] > 0.0 ? out[pos] / sqrt(denimg[pos]) : 0.0;
+      }
+
+      free(denimg);
+      free(wdata);
+      free(winv);
+      return status;
+    }
+
     for (iy0 = 0; iy0 < im->h; iy0++) {
       for (ix0 = 0; ix0 < im->w; ix0++) {
         double num = 0.0, den = 0.0;
