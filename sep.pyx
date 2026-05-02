@@ -3615,47 +3615,93 @@ def _psf_peak_quality(np.ndarray data not None, PSF psf not None,
                       xfit, yfit, flux, keep,
                       var=None, err=None, gain=None,
                       np.ndarray mask=None, double maskthresh=0.0):
-    cdef object data_arr
-    cdef object model
-    cdef object stamp
-    cdef object source_model
-    cdef object raw
-    cdef object neighbor_sub
-    cdef object variance
-    cdef object valid
-    cdef object psfw
-    cdef int rw = psf.stamp_width
-    cdef int rh = psf.stamp_height
+    cdef np.ndarray[np.float64_t, ndim=2] data_arr
+    cdef np.ndarray[np.float64_t, ndim=2] model
+    cdef np.ndarray[np.float64_t, ndim=2] var_arr
+    cdef np.ndarray[np.float64_t, ndim=2] err_arr
+    cdef np.ndarray[np.float64_t, ndim=2] mask_arr
+    cdef np.ndarray[np.float64_t, ndim=1] x_arr
+    cdef np.ndarray[np.float64_t, ndim=1] y_arr
+    cdef np.ndarray[np.float64_t, ndim=1] flux_arr
+    cdef np.ndarray[np.uint8_t, ndim=1] keep_arr
+    cdef int rw = psf.ptr.rw
+    cdef int rh = psf.ptr.rh
     cdef int halfw = rw // 2
     cdef int halfh = rh // 2
     cdef Py_ssize_t n = len(xfit)
     cdef Py_ssize_t nkeep = int(np.sum(keep))
     cdef Py_ssize_t outidx = 0
     cdef Py_ssize_t i
-    cdef int ix, iy, x0, x1, y0, y1, sx0, sx1, sy0, sy1
-    cdef double dx, dy, psfsum, qf_val, denom, numer, rawsum, invvar
-    cdef np.ndarray qf = np.zeros(nkeep, dtype=np.float64)
-    cdef np.ndarray rchi2 = np.full(nkeep, np.nan, dtype=np.float64)
-    cdef np.ndarray fracflux = np.full(nkeep, np.nan, dtype=np.float64)
+    cdef int ix, iy, x0, x1, y0, y1, sx0, sx1, sy0, sy1, sx, sy
+    cdef int px, py, status
+    cdef double dx, dy, psfsum, qf_val, numer, rawsum, invvar
+    cdef double neighbor_sum, pix, model_pix, psfw, src_pix, varpix
+    cdef double scalar_var = 1.0
+    cdef double gain_value = 0.0
+    cdef bint has_var_array = False
+    cdef bint has_err_array = False
+    cdef bint has_mask = mask is not None
+    cdef bint has_gain = gain is not None and gain > 0.0
+    cdef np.ndarray[np.float64_t, ndim=1] qf = np.zeros(nkeep, dtype=np.float64)
+    cdef np.ndarray[np.float64_t, ndim=1] rchi2 = np.full(nkeep, np.nan,
+                                                          dtype=np.float64)
+    cdef np.ndarray[np.float64_t, ndim=1] fracflux = np.full(nkeep, np.nan,
+                                                             dtype=np.float64)
 
     data_arr = np.ascontiguousarray(data, dtype=np.float64)
-    model = np.zeros(data_arr.shape, dtype=np.float64)
+    x_arr = np.ascontiguousarray(xfit, dtype=np.float64)
+    y_arr = np.ascontiguousarray(yfit, dtype=np.float64)
+    flux_arr = np.ascontiguousarray(flux, dtype=np.float64)
+    keep_arr = np.ascontiguousarray(keep, dtype=np.uint8)
+    model = np.zeros((data_arr.shape[0], data_arr.shape[1]), dtype=np.float64)
+    if has_gain:
+        gain_value = float(gain)
 
-    all_good = np.isfinite(flux) & np.isfinite(xfit) & np.isfinite(yfit)
+    all_good = np.isfinite(flux_arr) & np.isfinite(x_arr) & np.isfinite(y_arr)
     if np.any(all_good):
-        model_psf(model, xfit[all_good], yfit[all_good], flux[all_good], psf)
+        model_psf(model, x_arr[all_good], y_arr[all_good],
+                  flux_arr[all_good], psf)
+
+    if var is not None:
+        if np.ndim(var) == 0:
+            scalar_var = float(var)
+        else:
+            var_arr = np.ascontiguousarray(var, dtype=np.float64)
+            if (var_arr.shape[0] != data_arr.shape[0] or
+                    var_arr.shape[1] != data_arr.shape[1]):
+                raise ValueError("var has wrong shape")
+            has_var_array = True
+    elif err is not None:
+        if np.ndim(err) == 0:
+            scalar_var = float(err) * float(err)
+        else:
+            err_arr = np.ascontiguousarray(err, dtype=np.float64)
+            if (err_arr.shape[0] != data_arr.shape[0] or
+                    err_arr.shape[1] != data_arr.shape[1]):
+                raise ValueError("err has wrong shape")
+            has_err_array = True
+    if has_mask:
+        mask_arr = np.ascontiguousarray(mask, dtype=np.float64)
+        if (mask_arr.shape[0] != data_arr.shape[0] or
+                mask_arr.shape[1] != data_arr.shape[1]):
+            raise ValueError("mask has wrong shape")
 
     for i in range(n):
-        if not keep[i]:
+        if not keep_arr[i]:
+            continue
+        if not isfinite(x_arr[i]) or not isfinite(y_arr[i]):
+            outidx += 1
             continue
 
-        ix = int(xfit[i] + 0.5)
-        iy = int(yfit[i] + 0.5)
-        dx = xfit[i] - ix
-        dy = yfit[i] - iy
+        ix = int(x_arr[i] + 0.5)
+        iy = int(y_arr[i] + 0.5)
+        dx = x_arr[i] - ix
+        dy = y_arr[i] - iy
 
-        stamp = np.zeros((rh, rw), dtype=np.float64)
-        model_psf(stamp, [halfw + dx], [halfh + dy], [1.0], psf)
+        status = sep_psf_build(psf.ptr, x_arr[i], y_arr[i])
+        _assert_ok(status)
+        status = sep_psf_resample(psf.ptr, dx, dy)
+        _assert_ok(status)
 
         x0 = ix - halfw
         y0 = iy - halfh
@@ -3681,55 +3727,53 @@ def _psf_peak_quality(np.ndarray data not None, PSF psf not None,
             outidx += 1
             continue
 
-        psfw = stamp[sy0:sy1, sx0:sx1]
-        psfsum = float(np.sum(stamp))
+        psfsum = 0.0
+        for sy in range(rh):
+            for sx in range(rw):
+                psfsum += psf.ptr.resi[sy * rw + sx]
         if psfsum <= 0.0:
             outidx += 1
             continue
-        psfw = psfw / psfsum
 
-        raw = data_arr[y0:y1, x0:x1]
-        source_model = flux[i] * psfw
-        neighbor_sub = raw - (model[y0:y1, x0:x1] - source_model)
+        qf_val = 0.0
+        numer = 0.0
+        rawsum = 0.0
+        neighbor_sum = 0.0
+        for py in range(y0, y1):
+            sy = sy0 + py - y0
+            for px in range(x0, x1):
+                sx = sx0 + px - x0
+                pix = data_arr[py, px]
+                if not isfinite(pix):
+                    continue
+                if has_mask and mask_arr[py, px] > maskthresh:
+                    continue
+                if has_var_array:
+                    varpix = var_arr[py, px]
+                elif has_err_array:
+                    varpix = err_arr[py, px]
+                    varpix *= varpix
+                else:
+                    varpix = scalar_var
+                if not isfinite(varpix) or varpix <= 0.0:
+                    continue
+                if has_gain and pix > 0.0:
+                    varpix += pix / gain_value
 
-        if var is not None:
-            if np.ndim(var) == 0:
-                variance = np.full(raw.shape, float(var), dtype=np.float64)
-            else:
-                variance = np.asarray(var, dtype=np.float64)[y0:y1, x0:x1].copy()
-        elif err is not None:
-            if np.ndim(err) == 0:
-                variance = np.full(raw.shape, float(err) * float(err),
-                                   dtype=np.float64)
-            else:
-                variance = np.asarray(err, dtype=np.float64)[y0:y1, x0:x1] ** 2
-        else:
-            variance = np.ones(raw.shape, dtype=np.float64)
+                psfw = psf.ptr.resi[sy * rw + sx] / psfsum
+                src_pix = flux_arr[i] * psfw
+                model_pix = model[py, px]
+                qf_val += psfw
+                rawsum += pix * psfw
+                neighbor_sum += (pix - model_pix + src_pix) * psfw
+                invvar = 1.0 / varpix
+                numer += (pix - model_pix) * (pix - model_pix) * invvar * psfw
 
-        if gain is not None and gain > 0.0:
-            variance = variance + np.maximum(raw, 0.0) / gain
-
-        valid = np.isfinite(raw) & np.isfinite(variance) & (variance > 0.0)
-        if mask is not None:
-            valid &= np.asarray(mask)[y0:y1, x0:x1] <= maskthresh
-
-        qf_val = float(np.sum(psfw[valid]))
         qf[outidx] = qf_val
         if qf_val > 0.0:
-            numer = 0.0
-            for resid, vv, pw in zip(
-                    (neighbor_sub[valid] - source_model[valid]).ravel(),
-                    variance[valid].ravel(), psfw[valid].ravel()):
-                invvar = 1.0 / float(vv)
-                numer += float(resid) * float(resid) * invvar * float(pw)
             rchi2[outidx] = numer / qf_val
-
-            denom = float(np.sum(raw[valid] * psfw[valid]))
-            rawsum = denom
             if rawsum != 0.0:
-                fracflux[outidx] = (
-                    float(np.sum(neighbor_sub[valid] * psfw[valid])) / rawsum
-                )
+                fracflux[outidx] = neighbor_sum / rawsum
 
         outidx += 1
 
@@ -3741,7 +3785,8 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
                    double maskthresh=0.0, fit_snr=5.0,
                    bint fit_positions=True, bint keep_flagged=False,
                    int maxiter=20, double group_factor=2.0,
-                   min_qf=None, max_rchi2=None, min_fracflux=None):
+                   min_qf=None, max_rchi2=None, min_fracflux=None,
+                   bint compute_quality=True):
     if len(peaks) == 0:
         return _empty_psf_peak_fit_catalog()
 
@@ -3757,23 +3802,28 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
         keep &= fit_snr_values > fit_snr
     if not keep_flagged:
         keep &= flag == 0
-    qf, rchi2, fracflux = _psf_peak_quality(
-        data, psf, xfit, yfit, flux, keep, var=var, err=err, gain=gain,
-        mask=mask, maskthresh=maskthresh)
-    quality_keep = np.ones(len(qf), dtype=bool)
-    if min_qf is not None:
-        quality_keep &= qf >= min_qf
-    if max_rchi2 is not None:
-        quality_keep &= rchi2 <= max_rchi2
-    if min_fracflux is not None:
-        quality_keep &= fracflux >= min_fracflux
-    if not np.all(quality_keep):
-        kept_idx = np.flatnonzero(keep)
-        keep = np.zeros_like(keep, dtype=bool)
-        keep[kept_idx[quality_keep]] = True
-        qf = qf[quality_keep]
-        rchi2 = rchi2[quality_keep]
-        fracflux = fracflux[quality_keep]
+    if compute_quality:
+        qf, rchi2, fracflux = _psf_peak_quality(
+            data, psf, xfit, yfit, flux, keep, var=var, err=err, gain=gain,
+            mask=mask, maskthresh=maskthresh)
+        quality_keep = np.ones(len(qf), dtype=bool)
+        if min_qf is not None:
+            quality_keep &= qf >= min_qf
+        if max_rchi2 is not None:
+            quality_keep &= rchi2 <= max_rchi2
+        if min_fracflux is not None:
+            quality_keep &= fracflux >= min_fracflux
+        if not np.all(quality_keep):
+            kept_idx = np.flatnonzero(keep)
+            keep = np.zeros_like(keep, dtype=bool)
+            keep[kept_idx[quality_keep]] = True
+            qf = qf[quality_keep]
+            rchi2 = rchi2[quality_keep]
+            fracflux = fracflux[quality_keep]
+    else:
+        qf = np.full(np.sum(keep), np.nan, dtype=np.float64)
+        rchi2 = np.full(np.sum(keep), np.nan, dtype=np.float64)
+        fracflux = np.full(np.sum(keep), np.nan, dtype=np.float64)
 
     result = np.empty(np.sum(keep),
                       dtype=np.dtype([('x', np.float64),
@@ -4243,6 +4293,7 @@ def _psf_extract_peaks_iterative(np.ndarray data not None, float thresh,
             maxiter=fit_maxiter, group_factor=group_factor,
             min_qf=min_qf, max_rchi2=max_rchi2,
             min_fracflux=min_fracflux,
+            compute_quality=not peak_local_sky,
         )
         if len(fitted) == 0:
             break
@@ -4444,6 +4495,7 @@ def psf_extract(np.ndarray data not None, float thresh, PSF psf not None,
                 fit_positions=fit_positions, keep_flagged=keep_flagged,
                 maxiter=fit_maxiter, group_factor=group_factor, min_qf=min_qf,
                 max_rchi2=max_rchi2, min_fracflux=min_fracflux,
+                compute_quality=not peak_local_sky,
             )
             if peak_local_sky:
                 result = _refit_psf_peaks_with_model_sky(
