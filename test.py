@@ -2223,9 +2223,7 @@ def test_psf_extract_peaks_mode_local_sky_corrects_flux():
 
 def test_psf_extract_peaks_mode_local_sky_refits_after_model_subtraction():
     """Local sky fitting refits after subtracting the current source model."""
-    pytest.importorskip("scipy.ndimage")
-
-    psf = sep.PSF.from_gaussian(fwhm=8.0, oversampling=2)
+    psf = sep.PSF.from_gaussian(fwhm=10.0, oversampling=2)
     data = np.zeros((100, 100), dtype=np.float64)
     true_flux = 20000.0
     sep.model_psf(data, [50.0], [50.0], [true_flux], psf)

@@ -12,7 +12,8 @@ cimport numpy as np
 from cpython.mem cimport PyMem_Free, PyMem_Malloc
 from cpython.version cimport PY_MAJOR_VERSION
 from libc cimport limits
-from libc.math cimport sqrt
+from libc.math cimport exp, isfinite, sqrt
+from libc.stdlib cimport qsort
 
 np.import_array()  # To access the numpy C-API.
 
@@ -3384,6 +3385,146 @@ def _suppress_close_peaks(x, y, values, double min_distance):
     return keep[np.argsort(y[keep] * np.max(x + 1) + x[keep])]
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def _psf_peak_table_from_snr(np.ndarray[np.float64_t, ndim=2] snr not None,
+                             double thresh, int maxfilter_size,
+                             double min_distance):
+    cdef Py_ssize_t h = snr.shape[0]
+    cdef Py_ssize_t w = snr.shape[1]
+    cdef Py_ssize_t radius = maxfilter_size // 2
+    cdef Py_ssize_t y, x, yy, xx, y0, y1, x0, x1
+    cdef Py_ssize_t npeak = 0
+    cdef Py_ssize_t i, idx, kept_idx, cell_idx
+    cdef Py_ssize_t gx, gy, ngx, ngy, grid_nx, grid_ny
+    cdef double value, other, dx, dy, min_distance2, cell
+    cdef bint is_peak
+    cdef np.ndarray[np.int64_t, ndim=1] xpeak
+    cdef np.ndarray[np.int64_t, ndim=1] ypeak
+    cdef np.ndarray[np.float64_t, ndim=1] values
+    cdef np.ndarray[np.int64_t, ndim=1] order
+    cdef np.ndarray[np.int64_t, ndim=1] head
+    cdef np.ndarray[np.int64_t, ndim=1] next_idx
+    cdef np.ndarray[np.uint8_t, ndim=1] keep
+    cdef object result
+
+    if maxfilter_size < 1 or maxfilter_size % 2 != 1:
+        raise ValueError("maxfilter_size must be a positive odd integer")
+
+    for y in range(h):
+        y0 = max(0, y - radius)
+        y1 = min(h, y + radius + 1)
+        for x in range(w):
+            value = snr[y, x]
+            if not isfinite(value) or value <= thresh:
+                continue
+            is_peak = True
+            x0 = max(0, x - radius)
+            x1 = min(w, x + radius + 1)
+            for yy in range(y0, y1):
+                for xx in range(x0, x1):
+                    if yy == y and xx == x:
+                        continue
+                    other = snr[yy, xx]
+                    if not isfinite(other) or value < other:
+                        is_peak = False
+                        break
+                if not is_peak:
+                    break
+            if is_peak:
+                npeak += 1
+
+    xpeak = np.empty(npeak, dtype=np.int64)
+    ypeak = np.empty(npeak, dtype=np.int64)
+    values = np.empty(npeak, dtype=np.float64)
+    npeak = 0
+    for y in range(h):
+        y0 = max(0, y - radius)
+        y1 = min(h, y + radius + 1)
+        for x in range(w):
+            value = snr[y, x]
+            if not isfinite(value) or value <= thresh:
+                continue
+            is_peak = True
+            x0 = max(0, x - radius)
+            x1 = min(w, x + radius + 1)
+            for yy in range(y0, y1):
+                for xx in range(x0, x1):
+                    if yy == y and xx == x:
+                        continue
+                    other = snr[yy, xx]
+                    if not isfinite(other) or value < other:
+                        is_peak = False
+                        break
+                if not is_peak:
+                    break
+            if is_peak:
+                xpeak[npeak] = x
+                ypeak[npeak] = y
+                values[npeak] = value
+                npeak += 1
+
+    keep = np.ones(npeak, dtype=np.uint8)
+    if min_distance > 0.0 and npeak > 1:
+        keep[:] = 0
+        order = np.asarray(np.argsort(values)[::-1], dtype=np.int64)
+        cell = min_distance
+        min_distance2 = min_distance * min_distance
+        grid_nx = <Py_ssize_t>(w / cell) + 1
+        grid_ny = <Py_ssize_t>(h / cell) + 1
+        head = np.empty(grid_nx * grid_ny, dtype=np.int64)
+        head.fill(-1)
+        next_idx = np.empty(npeak, dtype=np.int64)
+        next_idx.fill(-1)
+
+        for i in range(npeak):
+            idx = order[i]
+            gx = <Py_ssize_t>(xpeak[idx] / cell)
+            gy = <Py_ssize_t>(ypeak[idx] / cell)
+            is_peak = True
+            for ngy in range(max(0, gy - 1), min(grid_ny, gy + 2)):
+                for ngx in range(max(0, gx - 1), min(grid_nx, gx + 2)):
+                    kept_idx = head[ngy * grid_nx + ngx]
+                    while kept_idx >= 0:
+                        dx = <double>xpeak[idx] - <double>xpeak[kept_idx]
+                        dy = <double>ypeak[idx] - <double>ypeak[kept_idx]
+                        if dx * dx + dy * dy <= min_distance2:
+                            is_peak = False
+                            break
+                        kept_idx = next_idx[kept_idx]
+                    if not is_peak:
+                        break
+                if not is_peak:
+                    break
+            if is_peak:
+                keep[idx] = 1
+                cell_idx = gy * grid_nx + gx
+                next_idx[idx] = head[cell_idx]
+                head[cell_idx] = idx
+
+    npeak = 0
+    for i in range(keep.shape[0]):
+        if keep[i]:
+            npeak += 1
+
+    result = np.empty(npeak,
+                      dtype=np.dtype([('x', np.float64),
+                                      ('y', np.float64),
+                                      ('snr', np.float64),
+                                      ('xpeak', np.int64),
+                                      ('ypeak', np.int64)]))
+    npeak = 0
+    for i in range(keep.shape[0]):
+        if keep[i]:
+            result['x'][npeak] = <double>xpeak[i]
+            result['y'][npeak] = <double>ypeak[i]
+            result['snr'][npeak] = values[i]
+            result['xpeak'][npeak] = xpeak[i]
+            result['ypeak'][npeak] = ypeak[i]
+            npeak += 1
+    return result
+
+
 def psf_peaks(np.ndarray data not None, float thresh, PSF psf not None,
               var=None, err=None, gain=None, np.ndarray mask=None,
               double maskthresh=0.0, int maxfilter_size=3,
@@ -3444,39 +3585,9 @@ def psf_peaks(np.ndarray data not None, float thresh, PSF psf not None,
         snr = _normalize_psf_snr(snr, mask, maskthresh, snr_bw, snr_bh,
                                  snr_fw, snr_fh, snr_fthresh)
 
-    peaks = np.isfinite(snr) & (snr > thresh)
-    radius = maxfilter_size // 2
-    padded = np.pad(snr, radius, mode="constant", constant_values=-np.inf)
-    center = padded[radius:radius + snr.shape[0], radius:radius + snr.shape[1]]
-
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            if dx == 0 and dy == 0:
-                continue
-            neighbor = padded[
-                radius + dy:radius + dy + snr.shape[0],
-                radius + dx:radius + dx + snr.shape[1],
-            ]
-            peaks &= center >= neighbor
-
-    ypeak, xpeak = np.nonzero(peaks)
-    values = snr[ypeak, xpeak]
-    keep = _suppress_close_peaks(xpeak, ypeak, values, min_distance)
-    xpeak = xpeak[keep]
-    ypeak = ypeak[keep]
-    values = values[keep]
-
-    result = np.empty(len(xpeak),
-                      dtype=np.dtype([('x', np.float64),
-                                      ('y', np.float64),
-                                      ('snr', np.float64),
-                                      ('xpeak', np.int64),
-                                      ('ypeak', np.int64)]))
-    result['x'] = xpeak.astype(np.float64)
-    result['y'] = ypeak.astype(np.float64)
-    result['snr'] = values
-    result['xpeak'] = xpeak
-    result['ypeak'] = ypeak
+    result = _psf_peak_table_from_snr(
+        np.ascontiguousarray(snr, dtype=np.float64),
+        thresh, maxfilter_size, min_distance)
 
     if return_snr:
         return result, snr
@@ -3696,110 +3807,295 @@ def _fit_psf_peaks(np.ndarray data not None, peaks, PSF psf not None,
     return result
 
 
+cdef int _compare_double(const void *a, const void *b) noexcept nogil:
+    cdef double da = (<double *>a)[0]
+    cdef double db = (<double *>b)[0]
+    if da < db:
+        return -1
+    if da > db:
+        return 1
+    return 0
+
+
+cdef double _median_double_buffer(double *buf, Py_ssize_t n) noexcept nogil:
+    if n <= 0:
+        return 0.0
+    qsort(buf, <size_t>n, sizeof(double), _compare_double)
+    if n % 2:
+        return buf[n // 2]
+    return 0.5 * (buf[n // 2 - 1] + buf[n // 2])
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def _psf_peak_local_sky(np.ndarray data not None, var=None,
                         np.ndarray mask=None, double maskthresh=0.0,
                         int box_size=20):
+    cdef np.ndarray[np.float64_t, ndim=2] image
+    cdef np.ndarray[np.float64_t, ndim=2] var_arr
+    cdef np.ndarray[np.float64_t, ndim=2] mask_arr
+    cdef np.ndarray[np.float64_t, ndim=2] val
+    cdef np.ndarray[np.float64_t, ndim=2] used
+    cdef np.ndarray[np.float64_t, ndim=2] sky
+    cdef np.ndarray[np.float64_t, ndim=1] yp
+    cdef np.ndarray[np.float64_t, ndim=1] xp
+    cdef Py_ssize_t h, w, nbin_y, nbin_x, max_box
+    cdef Py_ssize_t iy, ix, y, x, yy, xx, y0, y1, x0, x1
+    cdef Py_ssize_t ylo, yhi, xlo, xhi, count, nvalid
+    cdef Py_ssize_t k, nfilled, iteration, radius
+    cdef bint has_var = False
+    cdef bint has_mask = mask is not None
+    cdef double *buf = NULL
+    cdef double pix, varpix, weight, weighted_sum, weight_sum
+    cdef double sigma = 0.4
+    cdef double sigma2 = 2.0 * sigma * sigma
+    cdef double pos, frac
+
     if box_size <= 0:
         raise ValueError("peak_local_sky_box must be positive")
 
-    image = np.asarray(data, dtype=np.float64)
-    try:
-        from scipy.ndimage import gaussian_filter, map_coordinates
-    except ImportError:
-        bkg = Background(
-            image, mask=mask, maskthresh=maskthresh,
-            bw=box_size, bh=box_size, fw=1, fh=1
-        )
-        return bkg.back(dtype=np.float64)
-
-    nbin_y = int(np.ceil(image.shape[0] / float(box_size)))
-    nbin_x = int(np.ceil(image.shape[1] / float(box_size)))
-    yg = np.linspace(0, image.shape[0], nbin_y + 1).astype(np.int64)
-    xg = np.linspace(0, image.shape[1], nbin_x + 1).astype(np.int64)
+    image = np.ascontiguousarray(data, dtype=np.float64)
+    h = image.shape[0]
+    w = image.shape[1]
+    nbin_y = (h + box_size - 1) // box_size
+    nbin_x = (w + box_size - 1) // box_size
     val = np.zeros((nbin_y, nbin_x), dtype=np.float64)
     used = np.zeros((nbin_y, nbin_x), dtype=np.float64)
+    sky = np.empty((h, w), dtype=np.float64)
 
     if var is not None and np.ndim(var) != 0:
-        weight_good = np.asarray(var) > 0.0
-    else:
-        weight_good = np.ones(image.shape, dtype=bool)
-    if mask is not None:
-        weight_good &= np.asarray(mask) <= maskthresh
-    weight_good &= np.isfinite(image)
+        var_arr = np.ascontiguousarray(var, dtype=np.float64)
+        if var_arr.shape[0] != h or var_arr.shape[1] != w:
+            raise ValueError("var has wrong shape")
+        has_var = True
+    if has_mask:
+        mask_arr = np.ascontiguousarray(mask, dtype=np.float64)
+        if mask_arr.shape[0] != h or mask_arr.shape[1] != w:
+            raise ValueError("mask has wrong shape")
 
-    for iy in range(nbin_y):
-        for ix in range(nbin_x):
-            ys = slice(yg[iy], yg[iy + 1])
-            xs = slice(xg[ix], xg[ix + 1])
-            good = weight_good[ys, xs]
-            used[iy, ix] = np.sum(good)
-            if used[iy, ix] > 0:
-                val[iy, ix] = np.median(image[ys, xs][good])
+    max_box = ((h + nbin_y - 1) // nbin_y + 1) * ((w + nbin_x - 1) // nbin_x + 1)
+    buf = <double *>PyMem_Malloc(max_box * sizeof(double))
+    if buf == NULL:
+        raise MemoryError()
 
-    val[used < 20] = 0.0
-    used[used < 20] = 0.0
-    count = 0
-    while np.any(used == 0.0):
-        sig = 0.4
-        valc = gaussian_filter(val * (used > 0.0), sig, mode="constant")
-        weightc = gaussian_filter((used != 0.0).astype(np.float64), sig,
-                                  mode="constant")
-        missing = (used == 0.0) & (weightc > 1.0e-10)
-        val[missing] = valc[missing] / weightc[missing]
-        used[missing] = 1.0
-        count += 1
-        if count > 100:
-            missing = used == 0.0
-            if np.any(weight_good):
-                val[missing] = np.median(image[weight_good])
-            used[missing] = 1.0
+    try:
+        for iy in range(nbin_y):
+            y0 = (iy * h) // nbin_y
+            y1 = ((iy + 1) * h) // nbin_y
+            for ix in range(nbin_x):
+                x0 = (ix * w) // nbin_x
+                x1 = ((ix + 1) * w) // nbin_x
+                nvalid = 0
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        pix = image[y, x]
+                        if not isfinite(pix):
+                            continue
+                        if has_var:
+                            varpix = var_arr[y, x]
+                            if not isfinite(varpix) or varpix <= 0.0:
+                                continue
+                        if has_mask and mask_arr[y, x] > maskthresh:
+                            continue
+                        buf[nvalid] = pix
+                        nvalid += 1
+                used[iy, ix] = <double>nvalid
+                if nvalid > 0:
+                    val[iy, ix] = _median_double_buffer(buf, nvalid)
+
+        for iy in range(nbin_y):
+            for ix in range(nbin_x):
+                if used[iy, ix] < 20.0:
+                    val[iy, ix] = 0.0
+                    used[iy, ix] = 0.0
+    finally:
+        PyMem_Free(buf)
+
+    radius = 2
+    for iteration in range(100):
+        nfilled = 0
+        for iy in range(nbin_y):
+            for ix in range(nbin_x):
+                if used[iy, ix] != 0.0:
+                    continue
+                weighted_sum = 0.0
+                weight_sum = 0.0
+                ylo = max(0, iy - radius)
+                yhi = min(nbin_y, iy + radius + 1)
+                xlo = max(0, ix - radius)
+                xhi = min(nbin_x, ix + radius + 1)
+                for yy in range(ylo, yhi):
+                    for xx in range(xlo, xhi):
+                        if used[yy, xx] == 0.0:
+                            continue
+                        weight = exp(-(
+                            (yy - iy) * (yy - iy) +
+                            (xx - ix) * (xx - ix)) / sigma2)
+                        weighted_sum += weight * val[yy, xx]
+                        weight_sum += weight
+                if weight_sum > 1.0e-10:
+                    val[iy, ix] = weighted_sum / weight_sum
+                    used[iy, ix] = 1.0
+                    nfilled += 1
+        if nfilled == 0:
             break
 
-    y = np.arange(image.shape[0])
-    x = np.arange(image.shape[1])
-    yc = (yg[:-1] + yg[1:]) / 2.0
-    xc = (xg[:-1] + xg[1:]) / 2.0
-    yp = np.interp(y, yc, np.arange(len(yc), dtype=np.float64))
-    xp = np.interp(x, xc, np.arange(len(xc), dtype=np.float64))
-    ypa = yp.reshape(-1, 1) * np.ones(len(xp)).reshape(1, -1)
-    xpa = xp.reshape(1, -1) * np.ones(len(yp)).reshape(-1, 1)
-    coord = [ypa.ravel(), xpa.ravel()]
-    sky = map_coordinates(val, coord, mode="nearest", order=1)
-    return sky.reshape(image.shape)
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for iy in range(nbin_y):
+        for ix in range(nbin_x):
+            if used[iy, ix] != 0.0:
+                weighted_sum += val[iy, ix]
+                weight_sum += 1.0
+    if weight_sum > 0.0:
+        weighted_sum /= weight_sum
+    for iy in range(nbin_y):
+        for ix in range(nbin_x):
+            if used[iy, ix] == 0.0:
+                val[iy, ix] = weighted_sum
+                used[iy, ix] = 1.0
+
+    yp = np.empty(h, dtype=np.float64)
+    xp = np.empty(w, dtype=np.float64)
+    if nbin_y == 1:
+        for y in range(h):
+            yp[y] = 0.0
+    else:
+        for y in range(h):
+            pos = ((<double>y + 0.5 * h / nbin_y) * nbin_y / h) - 0.5
+            if pos < 0.0:
+                pos = 0.0
+            elif pos > nbin_y - 1:
+                pos = nbin_y - 1
+            yp[y] = pos
+    if nbin_x == 1:
+        for x in range(w):
+            xp[x] = 0.0
+    else:
+        for x in range(w):
+            pos = ((<double>x + 0.5 * w / nbin_x) * nbin_x / w) - 0.5
+            if pos < 0.0:
+                pos = 0.0
+            elif pos > nbin_x - 1:
+                pos = nbin_x - 1
+            xp[x] = pos
+
+    for y in range(h):
+        iy = <Py_ssize_t>yp[y]
+        if iy >= nbin_y - 1:
+            iy = nbin_y - 1
+            frac = 0.0
+        else:
+            frac = yp[y] - iy
+        for x in range(w):
+            ix = <Py_ssize_t>xp[x]
+            if ix >= nbin_x - 1:
+                ix = nbin_x - 1
+                pos = 0.0
+            else:
+                pos = xp[x] - ix
+            if iy == nbin_y - 1 and ix == nbin_x - 1:
+                sky[y, x] = val[iy, ix]
+            elif iy == nbin_y - 1:
+                sky[y, x] = (1.0 - pos) * val[iy, ix] + pos * val[iy, ix + 1]
+            elif ix == nbin_x - 1:
+                sky[y, x] = (1.0 - frac) * val[iy, ix] + frac * val[iy + 1, ix]
+            else:
+                sky[y, x] = (
+                    (1.0 - frac) * (
+                        (1.0 - pos) * val[iy, ix] + pos * val[iy, ix + 1]) +
+                    frac * (
+                        (1.0 - pos) * val[iy + 1, ix] +
+                        pos * val[iy + 1, ix + 1])
+                )
+
+    return sky
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def _peaks_far_from_sources(peaks, sources, min_distance):
-    if len(peaks) == 0 or len(sources) == 0 or min_distance is None:
+    cdef Py_ssize_t npeak = len(peaks)
+    cdef Py_ssize_t nsrc = len(sources)
+    cdef Py_ssize_t i, j, gx, gy, ngx, ngy, grid_nx, grid_ny, cell_idx
+    cdef double cell, radius2, dx, dy, minx, miny, maxx, maxy, px, py
+    cdef np.ndarray[np.float64_t, ndim=1] peak_x
+    cdef np.ndarray[np.float64_t, ndim=1] peak_y
+    cdef np.ndarray[np.float64_t, ndim=1] source_x
+    cdef np.ndarray[np.float64_t, ndim=1] source_y
+    cdef np.ndarray[np.int64_t, ndim=1] head
+    cdef np.ndarray[np.int64_t, ndim=1] next_idx
+    cdef np.ndarray[np.uint8_t, ndim=1] keep
+
+    if npeak == 0 or nsrc == 0 or min_distance is None:
         return np.ones(len(peaks), dtype=bool)
     if min_distance <= 0.0:
         return np.ones(len(peaks), dtype=bool)
 
+    peak_x = np.ascontiguousarray(peaks['x'], dtype=np.float64)
+    peak_y = np.ascontiguousarray(peaks['y'], dtype=np.float64)
+    source_x = np.ascontiguousarray(sources['x'], dtype=np.float64)
+    source_y = np.ascontiguousarray(sources['y'], dtype=np.float64)
+
+    minx = source_x[0]
+    maxx = source_x[0]
+    miny = source_y[0]
+    maxy = source_y[0]
+    for i in range(nsrc):
+        if source_x[i] < minx:
+            minx = source_x[i]
+        if source_x[i] > maxx:
+            maxx = source_x[i]
+        if source_y[i] < miny:
+            miny = source_y[i]
+        if source_y[i] > maxy:
+            maxy = source_y[i]
+    for i in range(npeak):
+        if peak_x[i] < minx:
+            minx = peak_x[i]
+        if peak_x[i] > maxx:
+            maxx = peak_x[i]
+        if peak_y[i] < miny:
+            miny = peak_y[i]
+        if peak_y[i] > maxy:
+            maxy = peak_y[i]
+
     cell = max(float(min_distance), 1.0)
     radius2 = float(min_distance) * float(min_distance)
-    grid = {}
-    for i in range(len(sources)):
-        gx = int(np.floor(sources['x'][i] / cell))
-        gy = int(np.floor(sources['y'][i] / cell))
-        grid.setdefault((gx, gy), []).append(i)
+    grid_nx = <Py_ssize_t>((maxx - minx) / cell) + 2
+    grid_ny = <Py_ssize_t>((maxy - miny) / cell) + 2
+    head = np.empty(grid_nx * grid_ny, dtype=np.int64)
+    head.fill(-1)
+    next_idx = np.empty(nsrc, dtype=np.int64)
+    next_idx.fill(-1)
 
-    keep = np.ones(len(peaks), dtype=bool)
-    for i in range(len(peaks)):
-        gx = int(np.floor(peaks['x'][i] / cell))
-        gy = int(np.floor(peaks['y'][i] / cell))
-        for ox in range(-1, 2):
-            for oy in range(-1, 2):
-                for j in grid.get((gx + ox, gy + oy), []):
-                    dx = peaks['x'][i] - sources['x'][j]
-                    dy = peaks['y'][i] - sources['y'][j]
+    for i in range(nsrc):
+        gx = <Py_ssize_t>((source_x[i] - minx) / cell)
+        gy = <Py_ssize_t>((source_y[i] - miny) / cell)
+        cell_idx = gy * grid_nx + gx
+        next_idx[i] = head[cell_idx]
+        head[cell_idx] = i
+
+    keep = np.ones(npeak, dtype=np.uint8)
+    for i in range(npeak):
+        gx = <Py_ssize_t>((peak_x[i] - minx) / cell)
+        gy = <Py_ssize_t>((peak_y[i] - miny) / cell)
+        for ngy in range(max(0, gy - 1), min(grid_ny, gy + 2)):
+            for ngx in range(max(0, gx - 1), min(grid_nx, gx + 2)):
+                j = head[ngy * grid_nx + ngx]
+                while j >= 0:
+                    dx = peak_x[i] - source_x[j]
+                    dy = peak_y[i] - source_y[j]
                     if dx * dx + dy * dy < radius2:
-                        keep[i] = False
+                        keep[i] = 0
                         break
+                    j = next_idx[j]
                 if not keep[i]:
                     break
             if not keep[i]:
                 break
 
-    return keep
+    return keep.astype(bool)
 
 
 def _subtract_psf_peak_catalog(residual, catalog, PSF psf not None):
