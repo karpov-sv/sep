@@ -81,6 +81,7 @@ static void build_interp_lut(float *lut, int size) {
 #define PSF_GROUP_SVD_TOL 1.0e-4
 #define PSF_FLUX_NNLS_MAXITER 512
 #define PSF_FLUX_NNLS_TOL 1.0e-10
+#define PSF_LOCAL_REFIT_MAX 8
 #define PSF_GROUP_INFLUENCE_REL 1.0e-2
 
 /*--------------------------------------------------------------------------*/
@@ -3849,15 +3850,24 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
     if (sxmax > group_xmax) group_xmax = sxmax;
     if (symin < group_ymin) group_ymin = symin;
     if (symax > group_ymax) group_ymax = symax;
-    if (fit_positions) {
-      status = sep_psf_fit(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
-                           maxiter, &pflux[idx], &pfluxerr[idx], &pxfit[idx],
-                           &pyfit[idx], &pxerr[idx], &pyerr[idx], &pniter[idx],
-                           &pchi2[idx], &pflag[idx]);
-    } else {
+    {
       double area;
+      /* Large connected components are refined locally below.  Starting them
+       * with a full independent position fit duplicates that local refinement
+       * cost for every source, while ignoring neighbor flux anyway.  Use the
+       * fixed-position matched-filter estimate as the initial flux, then let
+       * the local refinement update positions after grouped flux sweeps.
+       */
       status = sep_sum_psf(im, psf, x[idx], y[idx], id ? id[idx] : 0, inflag,
                            &pflux[idx], &pfluxerr[idx], &area, &pflag[idx]);
+      if (fit_positions) {
+        pxfit[idx] = x[idx];
+        pyfit[idx] = y[idx];
+        pxerr[idx] = 0.0;
+        pyerr[idx] = 0.0;
+        pniter[idx] = 0;
+        pchi2[idx] = 0.0;
+      }
     }
     if (status != RETURN_OK) return status;
   }
@@ -4115,12 +4125,93 @@ static int psf_fit_group_localized(const sep_image *im, sep_psf *psf,
   }
 
   if (fit_positions) {
-    for (i = 0; i < gcount; i++) {
-      status = psf_fit_subset(im, psf, pxfit, pyfit, id, inflag, refine_maxiter,
-                              1, gidx + i, gidx, gcount, pxfit, pyfit, pflux, ws,
-                              pflux, pfluxerr, pxfit, pyfit, pxerr, pyerr, pniter,
-                              pchi2, pflag);
-      if (status != RETURN_OK) goto cleanup;
+    int t = 0;
+    int nx = nx_arr[t], ny = ny_arr[t];
+    int64_t xbase = xbase_arr[t], ybase = ybase_arr[t];
+    int xi, yi;
+
+    for (xi = 0; xi < nx; xi++) {
+      int64_t core_xmin = xbase + (int64_t)xi * core_span;
+      int64_t core_xmax = core_xmin + core_span;
+
+      for (yi = 0; yi < ny; yi++) {
+        int left, right, k, core_count = 0, fixed_count = 0;
+        int64_t core_ymin = ybase + (int64_t)yi * core_span;
+        int64_t core_ymax = core_ymin + core_span;
+        int64_t ext_xmin = core_xmin - (int64_t)(local_radius + 0.5);
+        int64_t ext_xmax = core_xmax + (int64_t)(local_radius + 0.5);
+        int64_t ext_ymin = core_ymin - (int64_t)(local_radius + 0.5);
+        int64_t ext_ymax = core_ymax + (int64_t)(local_radius + 0.5);
+
+        left = psf_group_lower_bound(x, gidx, gcount,
+                                     (double)ext_xmin - 2.0 * (double)psf->rw);
+        right = psf_group_upper_bound(x, gidx, gcount,
+                                      (double)ext_xmax + 2.0 * (double)psf->rw);
+        for (k = left; k < right; k++) {
+          int idx = gidx[k];
+          int64_t sxmin, sxmax, symin, symax;
+          int in_core, in_ext;
+
+          psf_source_bbox(pxfit[idx], pyfit[idx], psf->rw, psf->rh,
+                          &sxmin, &sxmax, &symin, &symax);
+          in_core = pxfit[idx] >= (double)core_xmin &&
+                    pxfit[idx] < (double)core_xmax &&
+                    pyfit[idx] >= (double)core_ymin &&
+                    pyfit[idx] < (double)core_ymax;
+          in_ext = psf_bbox_overlap(ext_xmin, ext_xmax, ext_ymin, ext_ymax,
+                                    sxmin, sxmax, symin, symax);
+          if (in_core) {
+            core_idx[core_count++] = idx;
+          } else if (in_ext && pflux[idx] != 0.0) {
+            active_idx[fixed_count++] = idx;
+          }
+        }
+
+        if (core_count == 0) continue;
+
+        /* Sparse, percolated components are much larger than any one local
+         * fit.  Fit each tile core as a small simultaneous problem and hold
+         * only the surrounding overlap fixed, instead of refining thousands of
+         * transitively connected sources one at a time.
+         */
+        if (core_count > 1 && core_count <= PSF_LOCAL_REFIT_MAX) {
+          status = psf_fit_subset(im, psf, pxfit, pyfit, id, inflag,
+                                  refine_maxiter, core_count, core_idx,
+                                  active_idx, fixed_count, pxfit, pyfit, pflux,
+                                  ws, pflux, pfluxerr, pxfit, pyfit, pxerr,
+                                  pyerr, pniter, pchi2, pflag);
+          if (status != RETURN_OK) goto cleanup;
+        } else {
+          int m;
+          for (m = 0; m < core_count; m++) {
+            int idx = core_idx[m];
+            int64_t txmin, txmax, tymin, tymax;
+            int local_fixed_count = 0;
+
+            psf_source_bbox(pxfit[idx], pyfit[idx], psf->rw, psf->rh,
+                            &txmin, &txmax, &tymin, &tymax);
+            for (k = left; k < right; k++) {
+              int jdx = gidx[k];
+              int64_t fxmin, fxmax, fymin, fymax;
+              if (jdx == idx) continue;
+              if (pflux[jdx] == 0.0) continue;
+              psf_source_bbox(pxfit[jdx], pyfit[jdx], psf->rw, psf->rh,
+                              &fxmin, &fxmax, &fymin, &fymax);
+              if (!psf_bbox_overlap(txmin, txmax, tymin, tymax, fxmin, fxmax,
+                                    fymin, fymax))
+                continue;
+              active_idx[local_fixed_count++] = jdx;
+            }
+
+            status = psf_fit_subset(im, psf, pxfit, pyfit, id, inflag,
+                                    refine_maxiter, 1, &idx, active_idx,
+                                    local_fixed_count, pxfit, pyfit, pflux, ws,
+                                    pflux, pfluxerr, pxfit, pyfit, pxerr,
+                                    pyerr, pniter, pchi2, pflag);
+            if (status != RETURN_OK) goto cleanup;
+          }
+        }
+      }
     }
   }
 
