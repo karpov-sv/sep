@@ -1684,6 +1684,48 @@ def test_winpos_psf_array_matches_scalar_calls():
     assert_equal(flagb, flags)
 
 
+def test_winpos_segmented_close_pair_does_not_collapse():
+    """Strict segmented winpos should not drift onto a close neighbor."""
+    ygrid, xgrid = np.mgrid[:64, :64]
+    data = (
+        100.0 * np.exp(-((xgrid - 30.0) ** 2 + (ygrid - 32.0) ** 2) / 8.0)
+        + 250.0 * np.exp(-((xgrid - 34.0) ** 2 + (ygrid - 32.0) ** 2) / 8.0)
+    ).astype(np.float64)
+
+    segmap = np.zeros(data.shape, dtype=np.int32)
+    source = data > 1.0
+    segmap[source & (xgrid < 32)] = 1
+    segmap[source & (xgrid >= 32)] = 2
+
+    xinit = np.array([30.0, 34.0])
+    yinit = np.array([32.0, 32.0])
+    sig = np.array([2.0, 2.0])
+
+    xplain, _, _ = sep.winpos(data, xinit, yinit, sig)
+    xseg, yseg, flag = sep.winpos(
+        data, xinit, yinit, sig, segmap=segmap, seg_id=[-1, -2]
+    )
+
+    assert xplain[0] > 31.0
+    assert xseg[0] < 31.0
+    assert xseg[1] > 33.0
+    assert_allclose(yseg, yinit, atol=0.05)
+    assert np.all(flag & sep.APER_ALLMASKED == 0)
+
+
+def test_winpos_maxshift_caps_total_displacement():
+    """maxshift limits cumulative winpos motion and sets APER_TRUNC."""
+    ygrid, xgrid = np.mgrid[:48, :48]
+    data = np.exp(-((xgrid - 26.0) ** 2 + (ygrid - 24.0) ** 2) / 18.0)
+
+    xinit = np.array([18.0])
+    yinit = np.array([24.0])
+    xwin, ywin, flag = sep.winpos(data, xinit, yinit, sig=[6.0], maxshift=0.5)
+
+    assert_allclose(np.hypot(xwin - xinit, ywin - yinit), 0.5, atol=1.0e-12)
+    assert flag[0] & sep.APER_TRUNC
+
+
 def test_psf_flux_only():
     """PSF flux-only photometry recovers flux at the exact position."""
     fwhm = 3.5

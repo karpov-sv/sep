@@ -122,3 +122,10 @@ All changes here are transparent to users of the Python interface.
 
  - Added batched PSF-weighted centroiding for multiple sources, with
    threaded execution when OpenMP is enabled.
+
+.. c:function:: int sep_windowed()
+.. c:function:: int sep_windowed_psf()
+.. c:function:: int sep_windowed_psf_array()
+
+ - Added ``maxshift`` to cap total centroid motion from the initial
+   position.

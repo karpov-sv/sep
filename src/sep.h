@@ -652,6 +652,8 @@ SEP_API int sep_kron_radius(
  *              SExtractor uses 11. 0 is supported for exact overlap.
  * id         : Segmentation id for masking (see sep_sum_circle semantics).
  * maxstep    : Maximum step size per iteration. <= 0 disables limiting.
+ * maxshift   : Maximum total shift from the initial center. <= 0 disables
+ *              limiting.
  * xout, yout : output center.
  * niter      : number of iterations used.
  */
@@ -664,6 +666,7 @@ SEP_API int sep_windowed(
     short inflag,
     int id,
     double maxstep,
+    double maxshift,
     double * xout,
     double * yout,
     int * niter,
@@ -681,6 +684,8 @@ SEP_API int sep_windowed(
  * psf        : PSF model used for weighting.
  * id         : Segmentation id for masking (see sep_sum_circle semantics).
  * maxstep    : Maximum step size per iteration. <= 0 disables limiting.
+ * maxshift   : Maximum total shift from the initial center. <= 0 disables
+ *              limiting.
  * xout, yout : output center.
  * niter      : number of iterations used.
  */
@@ -692,6 +697,7 @@ SEP_API int sep_windowed_psf(
     short inflag,
     int id,
     double maxstep,
+    double maxshift,
     double * xout,
     double * yout,
     int * niter,
@@ -706,6 +712,7 @@ SEP_API int sep_windowed_psf(
  * n          : number of sources
  * id         : optional segmentation ids (may be NULL)
  * maxstep    : per-source maximum step sizes
+ * maxshift   : per-source maximum total shifts
  * xout, yout : output centers
  * niter      : number of iterations used per source
  * flag       : per-source flags
@@ -719,6 +726,7 @@ SEP_API int sep_windowed_psf_array(
     const int * id,
     short inflag,
     const double * maxstep,
+    const double * maxshift,
     double * xout,
     double * yout,
     int * niter,

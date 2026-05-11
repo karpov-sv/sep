@@ -3472,6 +3472,7 @@ int sep_windowed(
     short inflag,
     int id,
     double maxstep,
+    double maxshift,
     double * xout,
     double * yout,
     int * niter,
@@ -3481,7 +3482,7 @@ int sep_windowed(
   double dx, dy, dx1, dy2, offset, scale, scale2, tmp, dxpos, dypos, weight;
   double maskarea, maskweight, maskdxpos, maskdypos;
   double r, tv, twv, sigtv, totarea, overlap, rpix2, invtwosig2;
-  double wpix, step, step_scale;
+  double wpix, step, step_scale, xinit, yinit, xnew, ynew, shift2, shift_scale;
   int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize, ssize;
   int i, status, ismasked;
   short errisarray, errisstd;
@@ -3498,6 +3499,8 @@ int sep_windowed(
   }
 
   /* initializations */
+  xinit = x;
+  yinit = y;
   size = esize = msize = ssize = 0;
   tv = sigtv = 0.0;
   overlap = totarea = maskweight = 0.0;
@@ -3717,8 +3720,25 @@ int sep_windowed(
           dypos *= step_scale;
         }
       }
-      x += dxpos;
-      y += dypos;
+      xnew = x + dxpos;
+      ynew = y + dypos;
+      if (maxshift > 0.0) {
+        shift2 = (xnew - xinit) * (xnew - xinit)
+                 + (ynew - yinit) * (ynew - yinit);
+        if (shift2 > maxshift * maxshift) {
+          shift_scale = maxshift / sqrt(shift2);
+          xnew = xinit + (xnew - xinit) * shift_scale;
+          ynew = yinit + (ynew - yinit) * shift_scale;
+          dxpos = xnew - x;
+          dypos = ynew - y;
+          *flag |= SEP_APER_TRUNC;
+          x = xnew;
+          y = ynew;
+          break;
+        }
+      }
+      x = xnew;
+      y = ynew;
     } else {
       break;
     }
@@ -3807,6 +3827,7 @@ int sep_windowed_psf(
     short inflag,
     int id,
     double maxstep,
+    double maxshift,
     double * xout,
     double * yout,
     int * niter,
@@ -3814,6 +3835,7 @@ int sep_windowed_psf(
 ) {
   PIXTYPE pix;
   double dx, dy, dxpos, dypos, tmp, twv, tv, step, step_scale, weight;
+  double xinit, yinit, xnew, ynew, shift2, shift_scale;
   double maskarea, maskweight, maskdxpos, maskdypos, totarea;
   int64_t imx, imy, pos, size, msize, ssize;
   int i, sx, sy, status, ismasked;
@@ -3830,6 +3852,8 @@ int sep_windowed_psf(
   *yout = y;
   *niter = 0;
   status = RETURN_OK;
+  xinit = x;
+  yinit = y;
   datat = maskt = segt = NULL;
   size = msize = ssize = 0;
 
@@ -3951,8 +3975,25 @@ int sep_windowed_psf(
           dypos *= step_scale;
         }
       }
-      x += dxpos;
-      y += dypos;
+      xnew = x + dxpos;
+      ynew = y + dypos;
+      if (maxshift > 0.0) {
+        shift2 = (xnew - xinit) * (xnew - xinit)
+                 + (ynew - yinit) * (ynew - yinit);
+        if (shift2 > maxshift * maxshift) {
+          shift_scale = maxshift / sqrt(shift2);
+          xnew = xinit + (xnew - xinit) * shift_scale;
+          ynew = yinit + (ynew - yinit) * shift_scale;
+          dxpos = xnew - x;
+          dypos = ynew - y;
+          *flag |= SEP_APER_TRUNC;
+          x = xnew;
+          y = ynew;
+          break;
+        }
+      }
+      x = xnew;
+      y = ynew;
     } else {
       *flag |= SEP_APER_NONPOSITIVE;
       break;
@@ -3972,8 +4013,9 @@ int sep_windowed_psf(
 
 int sep_windowed_psf_array(const sep_image *im, sep_psf *psf, const double *x,
                            const double *y, int64_t n, const int *id,
-                           short inflag, const double *maxstep, double *xout,
-                           double *yout, int *niter, short *flag) {
+                           short inflag, const double *maxstep,
+                           const double *maxshift, double *xout, double *yout,
+                           int *niter, short *flag) {
 #ifdef _OPENMP
   int first_status = RETURN_OK;
 
@@ -3992,6 +4034,7 @@ int sep_windowed_psf_array(const sep_image *im, sep_psf *psf, const double *x,
       for (int64_t i = 0; i < n; i++) {
         int s = sep_windowed_psf(im, &local_psf, x[i], y[i], inflag,
                                  id ? id[i] : 0, maxstep ? maxstep[i] : 0.0,
+                                 maxshift ? maxshift[i] : 0.0,
                                  &xout[i], &yout[i], &niter[i], &flag[i]);
         if (s != RETURN_OK) {
 #pragma omp critical(winpos_psf_status)
@@ -4012,7 +4055,8 @@ int sep_windowed_psf_array(const sep_image *im, sep_psf *psf, const double *x,
 
   for (i = 0; i < n; i++) {
     status = sep_windowed_psf(im, psf, x[i], y[i], inflag, id ? id[i] : 0,
-                              maxstep ? maxstep[i] : 0.0, &xout[i], &yout[i],
+                              maxstep ? maxstep[i] : 0.0,
+                              maxshift ? maxshift[i] : 0.0, &xout[i], &yout[i],
                               &niter[i], &flag[i]);
     if (status != RETURN_OK) return status;
   }

@@ -258,15 +258,18 @@ cdef extern from "sep.h":
     int sep_windowed(const sep_image *image,
                      double x, double y, double sig,
                      int subpix, short inflag, int id, double maxstep,
+                     double maxshift,
                      double *xout, double *yout, int *niter, short *flag)
     int sep_windowed_psf(const sep_image *image, sep_psf *psf,
                          double x, double y,
                          short inflag, int id, double maxstep,
+                         double maxshift,
                          double *xout, double *yout, int *niter, short *flag)
     int sep_windowed_psf_array(const sep_image *image, sep_psf *psf,
                                const double *x, const double *y, np.int64_t n,
                                const int *id, short inflag,
                                const double *maxstep,
+                               const double *maxshift,
                                double *xout, double *yout,
                                int *niter, short *flag)
 
@@ -2713,10 +2716,10 @@ def kron_radius(np.ndarray data not None, x, y, a, b, theta, r,
 def winpos(np.ndarray data not None, xinit, yinit, sig=None,
            np.ndarray mask=None, double maskthresh=0.0, int subpix=11,
            double minsig=2.0/2.35*0.5, seg_id=None, np.ndarray segmap=None,
-           maxstep=None, PSF psf=None):
+           maxstep=None, maxshift=None, ignore_masked=None, PSF psf=None):
     """winpos(data, xinit, yinit, sig=None, mask=None, maskthresh=0.0,
               subpix=11, minsig=2.0/2.35*0.5, seg_id=None, segmap=None,
-              maxstep=None, psf=None)
+              maxstep=None, maxshift=None, ignore_masked=None, psf=None)
 
     Calculate more accurate object centroids using 'windowed' algorithm.
 
@@ -2785,6 +2788,19 @@ def winpos(np.ndarray data not None, xinit, yinit, sig=None,
         Maximum step size per iteration in pixels. If ``None`` or <= 0,
         no step limiting is applied.
 
+    maxshift : float or array_like, optional
+        Maximum total shift from the initial position in pixels. If ``None``
+        or <= 0, no total shift limiting is applied. If the limit is reached,
+        the output position is projected to the limit and ``APER_TRUNC`` is
+        set.
+
+    ignore_masked : bool, optional
+        If ``True``, masked pixels and segmentation-masked pixels are ignored
+        when updating the centroid. If ``False``, they are replaced by the
+        mean unmasked pixel value, matching the historical aperture masking
+        correction. The default is ``True`` when ``segmap`` is supplied and
+        ``False`` otherwise.
+
     psf : `PSF`, optional
         If supplied, use the evaluated and resampled PSF model as the
         centroid weighting function instead of a Gaussian window. This is
@@ -2802,13 +2818,16 @@ def winpos(np.ndarray data not None, xinit, yinit, sig=None,
     """
 
     cdef int status
+    cdef short inflag
     cdef double sigval
     cdef double maxstepval
+    cdef double maxshiftval
     cdef int niter = 0  # not currently returned
     cdef sep_image im
     cdef object shape
-    cdef np.ndarray xarr, yarr, maxsteparr, segidarr
+    cdef np.ndarray xarr, yarr, maxsteparr, maxshiftarr, segidarr
     cdef np.ndarray[np.float64_t, ndim=1, mode='c'] xbuf, ybuf, maxstepbuf
+    cdef np.ndarray[np.float64_t, ndim=1, mode='c'] maxshiftbuf
     cdef np.ndarray[np.float64_t, ndim=1, mode='c'] xoutbuf, youtbuf
     cdef np.ndarray[np.int32_t, ndim=1, mode='c'] segidbuf, niterarr
     cdef np.ndarray[np.int16_t, ndim=1, mode='c'] flagbuf
@@ -2832,11 +2851,17 @@ def winpos(np.ndarray data not None, xinit, yinit, sig=None,
     if maxstep is None:
         maxstep = 0.0
     maxstep = np.require(maxstep, dtype=dt)
+    if maxshift is None:
+        maxshift = 0.0
+    maxshift = np.require(maxshift, dtype=dt)
+    if ignore_masked is None:
+        ignore_masked = segmap is not None
+    inflag = SEP_MASK_IGNORE if ignore_masked else 0
 
     if psf is None:
-        shape = np.broadcast(xinit, yinit, sig, maxstep).shape
+        shape = np.broadcast(xinit, yinit, sig, maxstep, maxshift).shape
     else:
-        shape = np.broadcast(xinit, yinit, maxstep).shape
+        shape = np.broadcast(xinit, yinit, maxstep, maxshift).shape
 
     # Segmentation image and ids with same dimensions as xinit, yinit, etc.
     if seg_id is not None:
@@ -2852,30 +2877,35 @@ def winpos(np.ndarray data not None, xinit, yinit, sig=None,
     flag = np.empty(shape, np.short)
 
     if psf is None:
-        it = np.broadcast(xinit, yinit, sig, maxstep, seg_id, x, y, flag)
+        it = np.broadcast(
+            xinit, yinit, sig, maxstep, maxshift, seg_id, x, y, flag)
         while np.PyArray_MultiIter_NOTDONE(it):
             sigval = (<double*>np.PyArray_MultiIter_DATA(it, 2))[0]
             maxstepval = (<double*>np.PyArray_MultiIter_DATA(it, 3))[0]
+            maxshiftval = (<double*>np.PyArray_MultiIter_DATA(it, 4))[0]
             if sigval < minsig:
                 sigval = minsig
             status = sep_windowed(&im,
                                   (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
                                   (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
                                   sigval,
-                                  subpix, 0,
-                                  (<int*>np.PyArray_MultiIter_DATA(it, 4))[0],
+                                  subpix, inflag,
+                                  (<int*>np.PyArray_MultiIter_DATA(it, 5))[0],
                                   maxstepval,
-                                  <double*>np.PyArray_MultiIter_DATA(it, 5),
+                                  maxshiftval,
                                   <double*>np.PyArray_MultiIter_DATA(it, 6),
+                                  <double*>np.PyArray_MultiIter_DATA(it, 7),
                                   &niter,
-                                  <short*>np.PyArray_MultiIter_DATA(it, 7))
+                                  <short*>np.PyArray_MultiIter_DATA(it, 8))
             _assert_ok(status)
             np.PyArray_MultiIter_NEXT(it)
     else:
-        xarr, yarr, maxsteparr = np.broadcast_arrays(xinit, yinit, maxstep)
+        xarr, yarr, maxsteparr, maxshiftarr = np.broadcast_arrays(
+            xinit, yinit, maxstep, maxshift)
         xbuf = np.ascontiguousarray(xarr, dtype=dt).reshape(-1)
         ybuf = np.ascontiguousarray(yarr, dtype=dt).reshape(-1)
         maxstepbuf = np.ascontiguousarray(maxsteparr, dtype=dt).reshape(-1)
+        maxshiftbuf = np.ascontiguousarray(maxshiftarr, dtype=dt).reshape(-1)
         segidbuf = np.ascontiguousarray(seg_id, dtype=np.intc).reshape(-1)
         xoutbuf = np.empty(xbuf.size, dtype=np.float64)
         youtbuf = np.empty(ybuf.size, dtype=np.float64)
@@ -2888,8 +2918,9 @@ def winpos(np.ndarray data not None, xinit, yinit, sig=None,
                                         <double*>ybuf.data,
                                         xbuf.size,
                                         <int*>segidbuf.data,
-                                        0,
+                                        inflag,
                                         <double*>maxstepbuf.data,
+                                        <double*>maxshiftbuf.data,
                                         <double*>xoutbuf.data,
                                         <double*>youtbuf.data,
                                         <int*>niterarr.data,

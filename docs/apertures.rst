@@ -232,6 +232,18 @@ evaluated and resampled PSF itself as the weighting function:
 This PSF-weighted mode is useful when centroiding should follow the same
 model used for optimal extraction or PSF fitting.
 
+For crowded or deblended sources, ``winpos`` also accepts ``segmap`` and
+``seg_id``. Negative segment IDs restrict the centroid update to pixels in
+the matching segment, and ``maxshift`` can be used to cap the total motion
+from the initial centroid:
+
+.. code-block:: python
+
+    seg_id = -np.arange(1, len(objs)+1, dtype=np.int32)
+    xwin, ywin, flag = sep.winpos(data, objs['x'], objs['y'], sig,
+                                  segmap=seg, seg_id=seg_id,
+                                  maxshift=1.0)
+
 .. _segmentation masking:
 
 Segmentation-masked image measurements
@@ -265,7 +277,7 @@ mask for a given object will be pixels with
 
 The following functions include the segmentation masking:
 ``sum_circle``, ``sum_circann``, ``sum_ellipse``, ``sum_ellipann``,
-``flux_radius`` , and ``kron_radius`` (``winpos`` **currently does not**).
+``flux_radius`` , ``kron_radius``, and ``winpos``.
 
 Masking image regions
 ---------------------
