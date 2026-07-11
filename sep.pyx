@@ -20,10 +20,10 @@ np.import_array()  # To access the numpy C-API.
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("sep")
+    __version__ = version("sep-x")
 except PackageNotFoundError:
     # package is not installed
-    pass
+    __version__ = "0+unknown"
 
 # -----------------------------------------------------------------------------
 # Definitions from the SEP C library

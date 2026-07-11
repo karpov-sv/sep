@@ -1,7 +1,7 @@
-SEP
-===
+SEP-X
+=====
 
-*Python library for Source Extraction and Photometry*
+*Extended Python library for source extraction and photometry*
 
 
 About
@@ -21,7 +21,7 @@ workflows. There is often a desire to have programmatic access to
 perform one or more of the above tasks on in-memory images as part of
 a larger custom analysis.
 
-**SEP makes the core algorithms of Source Extractor available as a
+**SEP-X makes the core algorithms of Source Extractor available as a
 library of stand-alone functions and classes.** These operate directly
 on in-memory arrays (no FITS files or configuration files).  The code
 is derived from the Source Extractor code base (written in C) and aims
@@ -49,51 +49,48 @@ instructions.
 - Masking of elliptical regions on images.
 
 
-SEP, SEP-PJW, and Package Names
-...............................
+SEP-X and Upstream SEP
+......................
 
-``sep`` was originally released by Kyle Barbary, at
-`kbarbary/sep <https://github.com/kbarbary/sep>`_ (``sep<=1.2.1``). For a
-brief period, the package was maintained by Peter Watson, under the
-``sep-pjw`` package name, at
-`PJ-Watson/sep-pjw <https://github.com/PJ-Watson/sep-pjw>`_ and
-`PyPI/sep-pjw <https://pypi.org/project/sep-pjw/>`_
-(``1.3.0<=sep-pjw<=1.3.8``). Both of these repositories will be archived,
-and future development will take place at
-`sep-developers/sep <https://github.com/sep-developers/sep>`_
-(``sep>=1.4.0``).
-Note that there may be some incompatibilities between ``sep==1.2.1`` and
-``sep==1.4.0`` when using the C-API directly -- the changes are documented
-:doc:`here <changelogs/changes_to_c_api>`.
+SEP-X is an independently maintained fork of
+`upstream SEP <https://github.com/sep-developers/sep>`_. It retains SEP's
+Python and C APIs where practical, but has substantial additional extraction,
+photometry, PSF-fitting, and centroiding functionality.
+
+The published distribution is named ``sep-x`` while the import remains
+``sep`` and the C library remains ``libsep`` for source compatibility. Do not
+install SEP-X and upstream ``sep`` in the same environment: both provide the
+``sep`` extension. Replace upstream SEP before installing SEP-X::
+
+    python -m pip uninstall sep
+    python -m pip install sep-x
+
+Major changes include robust local-background estimation, grouped optimal
+extraction, a PSF modelling and fitting API, enhanced detection and
+deblending, and PSF- and segmentation-aware windowed centroids. See
+``CHANGES.md`` and :doc:`the C API change notes <changelogs/changes_to_c_api>`
+for detailed compatibility information.
 
 
 Installation
 ------------
 
-with conda
-..........
-
-SEP can be installed with conda from the ``conda-forge`` channel::
-
-    conda install -c conda-forge sep
-
-
 with pip
 ........
 
-SEP can also be installed with `pip <https://pip.pypa.io>`_. After
-ensuring that numpy is installed, run ::
+Once a release is published, SEP-X can be installed with
+`pip <https://pip.pypa.io>`_. After ensuring that numpy is installed, run ::
 
-    python -m pip install sep
+    python -m pip install sep-x
 
 If you get an error about permissions, you are probably using your
 system Python. In this case, I recommend using `pip's "user install"
 <https://pip.pypa.io/en/latest/user_guide/#user-installs>`_ option to
-install sep into your user directory ::
+install sep-x into your user directory ::
 
-    python -m pip install --user sep
+    python -m pip install --user sep-x
 
-Do **not** install ``sep`` or other third-party Python packages using
+Do **not** install ``sep-x`` or other third-party Python packages using
 ``sudo`` unless you are fully aware of the risks.
 
 
@@ -121,10 +118,10 @@ Contributing
 ------------
 
 Report a bug or documentation issue:
-http://github.com/sep-developers/sep/issues
+http://github.com/karpov-sv/sep/issues
 
-Development of ``sep`` takes place on GitHub at
-http://github.com/sep-developers/sep.  Contributions of bug fixes,
+Development of ``sep-x`` takes place on GitHub at
+http://github.com/karpov-sv/sep. Contributions of bug fixes,
 documentation improvements and minor feature additions are welcome via
 GitHub pull requests. For major features, it is best to open an issue
 discussing the change first.

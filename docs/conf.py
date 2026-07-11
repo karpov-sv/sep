@@ -79,7 +79,7 @@ source_suffix = ".rst"
 master_doc = "index"
 
 # General information about the project.
-project = "sep"
+project = "SEP-X"
 copyright = "2014-2024, Peter Watson and contributors"
 
 # The version info for the project you're documenting, acts as replacement for

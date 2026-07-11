@@ -9,7 +9,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sep"
+name = "sep-x"
 dynamic = ["version"]
 authors = [
   { name="Emmanuel Bertin"},
@@ -28,7 +28,7 @@ authors = [
 maintainers = [
   { name="Peter Watson", email="peter.watson+sep@inaf.it" },
 ]
-description="Astronomical source extraction and photometry library"
+description="SEP-X: extended astronomical source extraction and photometry"
 readme = "README.md"
 license = { text =  "LGPLv3+" }
 classifiers=[
@@ -58,9 +58,9 @@ docs = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/sep-developers/sep"
-"Bug Tracker" = "https://github.com/sep-developers/sep/issues"
-"Documentation" = "http://sep-pjw.readthedocs.org"
+"Homepage" = "https://github.com/karpov-sv/sep"
+"Bug Tracker" = "https://github.com/karpov-sv/sep/issues"
+"Documentation" = "https://github.com/karpov-sv/sep#readme"
 
 [tool.setuptools_scm]
 

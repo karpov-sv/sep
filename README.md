@@ -1,33 +1,53 @@
-SEP
-===
+SEP-X
+=====
 
-Python and C library for Source Extraction and Photometry.
+Extended Python and C library for Source Extraction and Photometry.
 
-[![PyPI](https://img.shields.io/pypi/v/sep?label=PyPI)](https://pypi.python.org/pypi/sep)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/sep?label=PyPI%20Downloads)](https://pypi.python.org/pypi/sep)
-[![Build Status](https://github.com/sep-developers/sep/workflows/CI/badge.svg)](https://github.com/sep-developers/sep/actions)
-[![Documentation Status](https://readthedocs.org/projects/sep/badge/?version=latest)](https://sep.readthedocs.io/en/latest/?badge=latest)
+[![PyPI](https://img.shields.io/pypi/v/sep-x?label=PyPI)](https://pypi.python.org/pypi/sep-x)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/sep-x?label=PyPI%20Downloads)](https://pypi.python.org/pypi/sep-x)
+[![Build Status](https://github.com/karpov-sv/sep/workflows/CI/badge.svg)](https://github.com/karpov-sv/sep/actions)
 [![JOSS](http://joss.theoj.org/papers/10.21105/joss.00058/status.svg)](http://dx.doi.org/10.21105/joss.00058)
 
 *"... [it's] an SEP: Somebody Else's Problem."
 "Oh, good. I can relax then."*
 
-SEP, SEP-PJW, and Package Names
--------------------------------
+SEP-X and original SEP
+----------------------
 
-`sep` was originally released by Kyle Barbary, at
-[kbarbary/sep](https://github.com/kbarbary/sep) (``sep<=1.2.1``). For a
-brief period, the package was maintained by Peter Watson, under the
-`sep-pjw` package name, at
-[PJ-Watson/sep-pjw](https://github.com/PJ-Watson/sep-pjw) and
-[PyPI/sep-pjw](https://pypi.org/project/sep-pjw/)
-(``1.3.0<=sep-pjw<=1.3.8``). Both of these repositories will be archived,
-and future development will take place at
-[sep-developers/sep](<https://github.com/sep-developers/sep>)
-(``sep>=1.4.0``). Note that there may be some incompatibilities between
-``sep==1.2.1`` and ``sep==1.4.0`` when using the C-API directly (to fix
-an indexing bug arising with large arrays) - all changes are documented
-[here](https://sep-pjw.readthedocs.io/en/latest/changelogs/changes_to_c_api.html).
+SEP-X is an independently maintained fork of
+[original SEP](https://github.com/sep-developers/sep), diverged after version 1.4.1 of the latter. It retains SEP's
+array-oriented Python and C APIs where practical, but it has diverged
+substantially and is not a drop-in replacement for every upstream release.
+
+The package published by this repository is named **`sep-x`**; its Python
+module remains **`sep`** and its C library remains **`libsep`** for source
+compatibility. Consequently, do not install `sep-x` alongside upstream `sep`
+in the same environment: both distributions provide the `sep` extension.
+Replace upstream SEP explicitly instead:
+
+```
+python -m pip uninstall sep
+python -m pip install sep-x
+```
+
+Major SEP-X additions and changes include:
+
+- robust sigma-clipped annulus statistics and local-background controls for
+  aperture photometry;
+- grouped optimal circular extraction for overlapping apertures;
+- a PSF API covering model construction/rendering, matched-S/N maps,
+  peak finding, individual and grouped PSF fitting, and fit diagnostics;
+- enhanced object detection and deblending, including FWHM estimates,
+  scalar-noise matched filtering, watershed deblending, and fixed-FWHM
+  deblend assignment;
+- PSF- and segmentation-aware windowed centroids with displacement limits;
+- expanded regression coverage plus reproducible performance and
+  scientific-recovery benchmarks.
+
+See [CHANGES.md](CHANGES.md) and the C API change notes in
+[docs/changelogs/changes_to_c_api.rst](docs/changelogs/changes_to_c_api.rst)
+for detailed compatibility information. The original SEP and Source Extractor
+papers remain the appropriate citations for the inherited algorithms.
 
 
 About
@@ -47,7 +67,7 @@ workflows. There is often a desire to have programmatic access to
 perform one or more of the above tasks on in-memory images as part of
 a larger custom analysis.
 
-**SEP makes the core algorithms of Source Extractor available as a
+**SEP-X makes the core algorithms of Source Extractor available as a
 library of stand-alone functions and classes.** These operate directly
 on in-memory arrays (no FITS files or configuration files).  The code
 is derived from the Source Extractor code base (written in C) and aims
@@ -71,22 +91,23 @@ Python
 
 **Install release version:**
 
-SEP can be installed with [pip](https://pip.pypa.io):
+Once a release is published, SEP-X can be installed with
+[pip](https://pip.pypa.io):
 
 ```
-python -m pip install sep
+python -m pip install sep-x
 ```
 
 If you get an error about permissions, you are probably using your
 system Python. In this case, we recommend using [pip's "user
 install"](https://pip.pypa.io/en/latest/user_guide/#user-installs)
-option to install sep into your user directory:
+option to install sep-x into your user directory:
 
 ```
-python -m pip install --user sep
+python -m pip install --user sep-x
 ```
 
-Do **not** install sep or other third-party Python packages using
+Do **not** install sep-x or other third-party Python packages using
 `sudo` unless you are fully aware of the risks.
 
 
@@ -158,14 +179,14 @@ and header file in `/path/to/prefix/include`. The default prefix is
 Contributing
 ------------
 
-- Report a bug or documentation issue: http://github.com/sep-developers/issues
-- Ask (or answer) a question: https://github.com/sep-developers/sep/discussions/categories/q-a
+- Report a bug or documentation issue: http://github.com/karpov-sv/sep/issues
+- Ask (or answer) a question: https://github.com/karpov-sv/sep/discussions/categories/q-a
 
-Development of SEP takes place on GitHub at
-[sep-developers/sep](http://github.com/sep-developers/sep).  Contributions of bug fixes,
+Development of SEP-X takes place on GitHub at
+[karpov-sv/sep](http://github.com/karpov-sv/sep). Contributions of bug fixes,
 documentation improvements and minor feature additions are welcome via
 GitHub pull requests. For major features, it is best to discuss the change first
-via [GitHub Discussions](https://github.com/sep-developers/sep/discussions/).
+via [GitHub Discussions](https://github.com/karpov-sv/sep/discussions/).
 
 The package regression suite is in `test.py`. Larger performance and
 scientific-recovery diagnostics are documented in
@@ -289,4 +310,4 @@ the data.
 
 **I have more questions!**
 
-Open a discussion on the [GitHub Discussions page](https://github.com/sep-developers/sep/discussions/categories/q-a)!
+Open a discussion on the [GitHub Discussions page](https://github.com/karpov-sv/sep/discussions/categories/q-a)!
