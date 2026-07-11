@@ -274,7 +274,13 @@ def test_vs_sextractor():
 
     # Extract objects (use deblend_cont=1.0 to disable deblending).
     bkg.subfrom(data)
-    objs = sep.extract(data, 1.5, err=bkg.globalrms, deblend_cont=1.0)
+    objs = sep.extract(
+        data,
+        1.5,
+        err=bkg.globalrms,
+        filter_type="conv",
+        deblend_cont=1.0,
+    )
     objs = np.sort(objs, order=["y"])
 
     # Read SExtractor result
@@ -569,6 +575,74 @@ def test_extract_with_noise_convolution():
 
     assert_approx_equal(objects[1]["x"], 17.0)
     assert_approx_equal(objects[1]["y"], 3.0)
+
+
+def test_extract_matched_filter_scalar_noise_matches_constant_array():
+    """Scalar noise uses the same matched-filter statistic as a flat map."""
+    rng = np.random.default_rng(1729)
+    shape = (65, 67)
+    ygrid, xgrid = np.mgrid[: shape[0], : shape[1]]
+    sigma = 3.0
+    data = (
+        1.4
+        * np.exp(-((xgrid - 32.0) ** 2 + (ygrid - 31.0) ** 2) / (2.0 * sigma**2))
+        + rng.normal(size=shape)
+    ).astype(np.float32)
+    ky, kx = np.mgrid[-8:9, -8:9]
+    kernel = np.exp(-(kx**2 + ky**2) / (2.0 * sigma**2)).astype(np.float32)
+
+    scalar, scalar_seg = sep.extract(
+        data,
+        4.0,
+        err=1.0,
+        minarea=1,
+        filter_kernel=kernel,
+        clean=False,
+        deblend_cont=1.0,
+        segmentation_map=True,
+    )
+    array, array_seg = sep.extract(
+        data,
+        4.0,
+        err=np.ones_like(data),
+        minarea=1,
+        filter_kernel=kernel,
+        clean=False,
+        deblend_cont=1.0,
+        segmentation_map=True,
+    )
+
+    assert_allclose_structured(scalar, array)
+    assert_equal(scalar_seg, array_seg)
+
+
+def test_extract_watershed_uses_filtered_detection_plane():
+    """Pixel noise must not split one faint broad source into many basins."""
+    rng = np.random.default_rng(1729)
+    shape = (129, 129)
+    ygrid, xgrid = np.mgrid[: shape[0], : shape[1]]
+    sigma = 10.0 / 2.354820045
+    data = (
+        0.8
+        * np.exp(-((xgrid - 64.0) ** 2 + (ygrid - 64.0) ** 2) / (2.0 * sigma**2))
+        + rng.normal(size=shape)
+    ).astype(np.float32)
+    ky, kx = np.mgrid[-12:13, -12:13]
+    kernel = np.exp(-(kx**2 + ky**2) / (2.0 * sigma**2)).astype(np.float32)
+
+    objects = sep.extract(
+        data,
+        4.0,
+        err=1.0,
+        minarea=5,
+        filter_kernel=kernel,
+        clean=False,
+        deblend_cont=0.005,
+        deblend_method="watershed",
+    )
+
+    assert len(objects) == 1
+    assert objects["npix"][0] > 100
 
 
 @pytest.mark.parametrize("fwhm", [1.0, 1.2, 1.4, 1.6])
@@ -1309,7 +1383,12 @@ def test_masked_segmentation_measurements():
 
     # Run source detection
     objs, segmap = sep.extract(
-        data, thresh=1.2, err=rms, mask=None, segmentation_map=True
+        data,
+        thresh=1.2,
+        err=rms,
+        mask=None,
+        filter_type="conv",
+        segmentation_map=True,
     )
 
     seg_id = np.arange(1, len(objs) + 1, dtype=np.int32)
@@ -1542,6 +1621,48 @@ def test_extract_watershed_centroids_follow_segment_moments():
         # This regression should fail if deblended centroids fall back to
         # integer watershed seeds / peak pixels instead of measured moments.
         assert abs(obj["x"] - obj["xpeak"]) > 0.1
+
+
+def test_extract_watershed_peak_relabel_preserves_brightness_order():
+    """Peak-separation relabeling must not overwrite later source seeds."""
+    ygrid, xgrid = np.mgrid[:31, :31]
+    data = (
+        12.0 * np.exp(-((xgrid - 8.0) ** 2 + (ygrid - 15.0) ** 2) / 20.0)
+        + 30.0 * np.exp(-((xgrid - 21.0) ** 2 + (ygrid - 15.0) ** 2) / 20.0)
+    ).astype(np.float32)
+
+    objects = sep.extract(
+        data,
+        0.01,
+        minarea=1,
+        filter_kernel=None,
+        clean=False,
+        deblend_cont=0.001,
+        deblend_fwhm=2.0,
+        deblend_method="watershed",
+    )
+    objects.sort(order="x")
+
+    assert len(objects) == 2
+    assert_allclose(objects["x"], [8.0, 21.0], atol=0.5)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"minarea": 0},
+        {"deblend_nthresh": -1},
+        {"deblend_cont": -0.1},
+        {"deblend_cont": 1.1},
+        {"deblend_fwhm": -1.0},
+        {"clean_param": 0.0},
+        {"filter_kernel": np.zeros((3, 3), dtype=np.float32)},
+    ],
+)
+def test_extract_rejects_invalid_detection_parameters(kwargs):
+    data = np.zeros((5, 5), dtype=np.float32)
+    with pytest.raises(ValueError):
+        sep.extract(data, 1.0, **kwargs)
 
 
 def test_long_error_msg():

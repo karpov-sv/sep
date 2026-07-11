@@ -128,7 +128,7 @@ int lutz(
   sty = objparent->ymin;
   enx = objparent->xmax;
   eny = objparent->ymax;
-  thresh = objlist->thresh;
+  thresh = objlist->dthresh;
   cn = 0;
 
   iscan = objrootsubmap + (sty - suby) * subw + (stx - subx);
@@ -182,7 +182,7 @@ int lutz(
       } else {
         curpixinfo.flag = trunflag;
         plistint = plistin + inewsymbol;
-        luflag = (PLISTPIX(plistint, cdvalue) > thresh ? 1 : 0);
+        luflag = (PLISTPIX(plistint, detvalue) > thresh ? 1 : 0);
       }
       if (luflag) {
         if (xl == 0 || xl == buffers->xmax) {

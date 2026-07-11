@@ -38,8 +38,10 @@
 /* thresholding filtered weight-maps */
 
 /* globals */
-_Thread_local int64_t plistexist_cdvalue, plistexist_thresh, plistexist_var;
-_Thread_local int64_t plistoff_value, plistoff_cdvalue, plistoff_thresh, plistoff_var;
+_Thread_local int64_t plistexist_cdvalue, plistexist_detvalue, plistexist_thresh,
+    plistexist_var;
+_Thread_local int64_t plistoff_value, plistoff_cdvalue, plistoff_detvalue,
+    plistoff_thresh, plistoff_var;
 _Thread_local int64_t plistsize;
 _Thread_local unsigned int randseed;
 static _Atomic size_t extract_pixstack = 300000;
@@ -74,7 +76,7 @@ int segsortit(
     objliststruct * finalobjlist,
     double gain
 );
-void plistinit(int hasconv, int hasvar);
+void plistinit(int hasconv, int hasdet, int hasvar);
 void clean(objliststruct * objlist, double clean_param, int * survives);
 PIXTYPE get_mean_thresh(infostruct * info, pliststruct * pixel);
 int convert_to_catalog(
@@ -541,9 +543,10 @@ int sep_extract_with_pixels(
       return RELTHRESH_NO_NOISE;
     }
 
+    relthresh = thresh; /* threshold in matched-filter S/N units */
     isvarthresh = isvarnoise; /* threshold is variable if noise is */
     if (isvarthresh) {
-      relthresh = thresh; /* used below to set `thresh` for each pixel. */
+      /* relthresh is used below to set `thresh` for each pixel. */
     } else {
       /* thresh is constant; convert relative threshold to absolute */
       thresh *= pixsig;
@@ -552,6 +555,7 @@ int sep_extract_with_pixels(
 
   /* this is input `thresh` regardless of thresh_type. */
   objlist.thresh = thresh;
+  objlist.dthresh = thresh;
 
   /*Allocate memory for buffers */
   stacksize = w + 1;
@@ -654,7 +658,16 @@ int sep_extract_with_pixels(
 
 
   /* Allocate memory for the pixel list */
-  plistinit((conv != NULL), (image->noise_type != SEP_NOISE_NONE));
+  /* Matched filtering is meaningful for scalar and array-valued noise. */
+  if (!(conv && image->noise_type != SEP_NOISE_NONE)) {
+    filter_type = SEP_FILTER_CONV;
+  }
+
+  plistinit(
+      (conv != NULL),
+      (conv != NULL && filter_type == SEP_FILTER_MATCHED),
+      (image->noise_type != SEP_NOISE_NONE)
+  );
   if (!(pixel = objlist.plist = malloc(nposize = mem_pixstack * plistsize))) {
     status = MEMORY_ALLOC_ERROR;
     goto exit;
@@ -668,12 +681,6 @@ int sep_extract_with_pixels(
     PLIST(pixt, nextpix) = i;
   }
   PLIST(pixt, nextpix) = -1;
-
-  /* can only use a matched filter when convolving and when there is a noise
-   * array, real or synthetic */
-  if (!(conv && isvarnoise)) {
-    filter_type = SEP_FILTER_CONV;
-  }
 
   if (conv) {
     /* allocate memory for convolved buffers */
@@ -731,17 +738,32 @@ int sep_extract_with_pixels(
         }
 
         if (filter_type == SEP_FILTER_MATCHED) {
-          status = matched_filter(
-              &dbuf,
-              &nbuf,
-              yl,
-              convnorm,
-              convw,
-              convh,
-              workscan,
-              sigscan,
-              image->noise_type
-          );
+          if (isvarnoise) {
+            status = matched_filter(
+                &dbuf,
+                &nbuf,
+                yl,
+                convnorm,
+                convw,
+                convh,
+                workscan,
+                sigscan,
+                image->noise_type
+            );
+          } else {
+            status = matched_filter_const(
+                w,
+                h,
+                yl,
+                convnorm,
+                convw,
+                convh,
+                pixsig,
+                cdscan,
+                workscan,
+                sigscan
+            );
+          }
 
           if (status != RETURN_OK) {
             goto exit;
@@ -806,6 +828,9 @@ int sep_extract_with_pixels(
               if (PLISTEXIST(cdvalue)) {
                 PLISTPIX(pixt, cdvalue) = cdnewsymbol;
               };
+              if (PLISTEXIST(detvalue)) {
+                PLISTPIX(pixt, detvalue) = sigscan[xl];
+              };
               if (PLISTEXIST(var)) {
                 PLISTPIX(pixt, var) = pixvar;
               };
@@ -853,6 +878,9 @@ int sep_extract_with_pixels(
           PLIST(pixt, value) = scan[xl];
           if (PLISTEXIST(cdvalue)) {
             PLISTPIX(pixt, cdvalue) = cdnewsymbol;
+          };
+          if (PLISTEXIST(detvalue)) {
+            PLISTPIX(pixt, detvalue) = sigscan[xl];
           };
           if (PLISTEXIST(var)) {
             PLISTPIX(pixt, var) = pixvar;
@@ -973,6 +1001,8 @@ int sep_extract_with_pixels(
                   } else {
                     objlist.thresh = thresh;
                   }
+                  objlist.dthresh =
+                      PLISTEXIST(detvalue) ? relthresh : objlist.thresh;
 
                   status = sortit(
                       &info[co],
@@ -1127,6 +1157,7 @@ int segsortit(
 
   obj.thresh =
       plistexist_thresh ? get_mean_thresh(info, objlist->plist) : objlist->thresh;
+  obj.dthresh = obj.thresh;
 
   analyse(0, objlist, 1, gain);
 
@@ -1176,6 +1207,7 @@ int sortit(
   obj.lastpix = info->lastpix;
   obj.flag = info->flag;
   obj.thresh = objlist->thresh;
+  obj.dthresh = objlist->dthresh;
 
   preanalyse(0, objlist);
 
@@ -1303,7 +1335,7 @@ earlyexit:
  * (originally init_plist() in sextractor)
 PURPOSE	initialize a pixel-list and its components.
  ***/
-void plistinit(int hasconv, int hasvar) {
+void plistinit(int hasconv, int hasdet, int hasvar) {
   pbliststruct * pbdum = NULL;
 
   plistsize = sizeof(pbliststruct);
@@ -1316,6 +1348,15 @@ void plistinit(int hasconv, int hasvar) {
   } else {
     plistexist_cdvalue = 0;
     plistoff_cdvalue = plistoff_value;
+  }
+
+  if (hasdet) {
+    plistexist_detvalue = 1;
+    plistoff_detvalue = plistsize;
+    plistsize += sizeof(PIXTYPE);
+  } else {
+    plistexist_detvalue = 0;
+    plistoff_detvalue = plistoff_cdvalue;
   }
 
   if (hasvar) {

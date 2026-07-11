@@ -156,8 +156,9 @@ int deblend(
 
   for (l = 0; l < objlistin->nobj && status == RETURN_OK; l++) {
     /* set thresholds of object lists based on object threshold */
-    thresh0 = objlistin->obj[l].thresh;
-    objlistout->thresh = debobjlist2.thresh = thresh0;
+    thresh0 = objlistin->obj[l].dthresh;
+    objlistout->thresh = debobjlist2.thresh = objlistin->obj[l].thresh;
+    objlistout->dthresh = debobjlist2.dthresh = thresh0;
 
     /* add input object to global deblending objlist and one local objlist */
     if ((status = addobjdeep(l, objlistin, &objlist[0])) != RETURN_OK) {
@@ -167,9 +168,9 @@ int deblend(
       goto exit;
     }
 
-    value0 = objlist[0].obj[0].fdflux * deblend_mincont;
+    value0 = objlist[0].obj[0].detflux * deblend_mincont;
     ctx->ok[0] = (short)1;
-    thresh = objlistin->obj[l].fdpeak;
+    thresh = objlistin->obj[l].detpeak;
     {
       double thresh_step = thresh > 0.0 ? pow(thresh / thresh0, 1.0 / xn) : 1.0;
       double thresh_level = thresh0;
@@ -179,7 +180,8 @@ int deblend(
         if (thresh > 0.0) {
           thresh_level *= thresh_step;
         }
-        debobjlist.thresh = thresh > 0.0 ? thresh_level : thresh0;
+        debobjlist.thresh = objlistin->obj[l].thresh;
+        debobjlist.dthresh = thresh > 0.0 ? thresh_level : thresh0;
 
         /*--------- Build tree (bottom->up) */
         if (objlist[k - 1].nobj >= nsonmax) {
@@ -205,14 +207,16 @@ int deblend(
 
           for (j = h = 0; j < debobjlist.nobj; j++) {
             objstruct *child = debobjlist.obj + j;
-            double excess_flux = child->fdflux - debobjlist.thresh * child->fdnpix;
+            double excess_flux =
+                child->detflux - debobjlist.dthresh * child->fdnpix;
 
             if (excess_flux <= value0) {
               continue;
             }
 
             if (belong(j, &debobjlist, i, &objlist[k - 1])) {
-              child->thresh = debobjlist.thresh;
+              child->thresh = objlistin->obj[l].thresh;
+              child->dthresh = debobjlist.dthresh;
               if ((status = addobjdeep(j, &debobjlist, &objlist[k])) != RETURN_OK) {
                 goto exit;
               }
@@ -244,7 +248,7 @@ int deblend(
       for (i = 0; i < objlist[k].nobj; i++) {
         for (m = h = 0; (j = (int64_t)ctx->son[k + xn * (i + nsonmax * h)]) != -1; h++)
         {
-          if (obj[j].fdflux - obj[j].thresh * obj[j].fdnpix > value0) {
+          if (obj[j].detflux - obj[j].dthresh * obj[j].fdnpix > value0) {
             m++;
           }
           ctx->ok[k + xn * i] &= ctx->ok[k + 1 + xn * j];
@@ -252,7 +256,7 @@ int deblend(
         if (m > 1) {
           for (h = 0; (j = (int64_t)ctx->son[k + xn * (i + nsonmax * h)]) != -1; h++) {
             if (ctx->ok[k + 1 + xn * j]
-                && obj[j].fdflux - obj[j].thresh * obj[j].fdnpix > value0)
+                && obj[j].detflux - obj[j].dthresh * obj[j].fdnpix > value0)
             {
               objlist[k + 1].obj[j].flag |= SEP_OBJ_MERGED;
               status = addobjdeep(j, &objlist[k + 1], &debobjlist2);
@@ -364,6 +368,8 @@ static int deblend_watershed(
   int deb_minarea;
   double min_peak_sep;
   int *peak_order;
+  int64_t *new_peakidx;
+  float *new_peakx, *new_peaky, *new_peakval;
 
   status = RETURN_OK;
   pixel = objlistin->plist;
@@ -375,6 +381,7 @@ static int deblend_watershed(
   for (l = 0; l < objlistin->nobj && status == RETURN_OK; l++) {
     obj = objlistin->obj + l;
     objlistout->thresh = obj->thresh;
+    objlistout->dthresh = obj->dthresh;
 
     subx = obj->xmin;
     suby = obj->ymin;
@@ -395,6 +402,8 @@ static int deblend_watershed(
     obj_counts = NULL;
     obj_labels = NULL;
     peak_order = NULL;
+    new_peakidx = NULL;
+    new_peakx = new_peaky = new_peakval = NULL;
     seglist.obj = NULL;
     seglist.plist = NULL;
 
@@ -427,7 +436,7 @@ static int deblend_watershed(
       int64_t x = PLIST(pixt, x);
       int64_t y = PLIST(pixt, y);
       idx = (x - subx) + (y - suby) * subw;
-      valmap[idx] = (float)PLISTPIX(pixt, value);
+      valmap[idx] = (float)PLISTPIX(pixt, detvalue);
       pixpos[count++] = idx;
     }
 
@@ -532,14 +541,28 @@ static int deblend_watershed(
       for (i = 1; i <= npeaks; i++) {
         label[peakidx[i]] = 0;
       }
+      new_peakidx = (int64_t *)malloc((size_t)(kept + 1) * sizeof(int64_t));
+      new_peakx = (float *)malloc((size_t)(kept + 1) * sizeof(float));
+      new_peaky = (float *)malloc((size_t)(kept + 1) * sizeof(float));
+      new_peakval = (float *)malloc((size_t)(kept + 1) * sizeof(float));
+      if (!new_peakidx || !new_peakx || !new_peaky || !new_peakval) {
+        status = MEMORY_ALLOC_ERROR;
+        goto obj_cleanup;
+      }
       for (i = 0; i < kept; i++) {
         int lab = peak_order[i];
         int newlab = (int)(i + 1);
-        label[peakidx[lab]] = newlab;
-        peakx[newlab] = peakx[lab];
-        peaky[newlab] = peaky[lab];
-        peakval[newlab] = peakval[lab];
-        peakidx[newlab] = peakidx[lab];
+        new_peakidx[newlab] = peakidx[lab];
+        new_peakx[newlab] = peakx[lab];
+        new_peaky[newlab] = peaky[lab];
+        new_peakval[newlab] = peakval[lab];
+      }
+      for (i = 1; i <= kept; i++) {
+        label[new_peakidx[i]] = (int)i;
+        peakidx[i] = new_peakidx[i];
+        peakx[i] = new_peakx[i];
+        peaky[i] = new_peaky[i];
+        peakval[i] = new_peakval[i];
       }
       npeaks = kept;
     }
@@ -613,7 +636,7 @@ static int deblend_watershed(
       if (j <= 0) {
         continue;
       }
-      flux[j] += valmap[idx];
+      flux[j] += valmap[idx] - obj->dthresh;
       npix[j] += 1;
       if (valmap[idx] > peakval[j]) {
         peakval[j] = valmap[idx];
@@ -690,6 +713,7 @@ static int deblend_watershed(
     seglist.nobj = nkeep;
     seglist.npix = 0;
     seglist.thresh = obj->thresh;
+    seglist.dthresh = obj->dthresh;
     if (!(seglist.obj = (objstruct *)calloc((size_t)nkeep, sizeof(objstruct)))) {
       status = MEMORY_ALLOC_ERROR;
       goto obj_cleanup;
@@ -708,6 +732,7 @@ static int deblend_watershed(
       seglist.obj[i].lastpix = -1;
       seglist.obj[i].flag = obj->flag | SEP_OBJ_MERGED;
       seglist.obj[i].thresh = obj->thresh;
+      seglist.obj[i].dthresh = obj->dthresh;
       seglist.obj[i].mx = peakx[obj_labels[i]];
       seglist.obj[i].my = peaky[obj_labels[i]];
     }
@@ -770,6 +795,10 @@ static int deblend_watershed(
     free(obj_counts);
     free(obj_labels);
     free(peak_order);
+    free(new_peakidx);
+    free(new_peakx);
+    free(new_peaky);
+    free(new_peakval);
     free(seglist.obj);
     free(seglist.plist);
   }
@@ -803,6 +832,7 @@ int gatherup(
   status = RETURN_OK;
 
   objlistout->thresh = objlistin->thresh;
+  objlistout->dthresh = objlistin->dthresh;
 
   /* Optional fixed-PSF deblending: use circular Gaussian with given FWHM. */
   use_fixed = 0;
@@ -837,6 +867,7 @@ int gatherup(
   for (objt = objin + (i = 1); i < nobj; i++, objt++) {
     /*-- Now we have passed the deblending section, reset threshold */
     objt->thresh = objlistin->thresh;
+    objt->dthresh = objlistin->dthresh;
 
     /* ------------	flag pixels which are already allocated */
     for (pixt = pixelin + objin[i].firstpix; pixt >= pixelin;

@@ -79,15 +79,17 @@ typedef struct {
 
 
 /* globals */
-extern _Thread_local int64_t plistexist_cdvalue, plistexist_thresh, plistexist_var;
-extern _Thread_local int64_t plistoff_value, plistoff_cdvalue, plistoff_thresh,
-    plistoff_var;
+extern _Thread_local int64_t plistexist_cdvalue, plistexist_detvalue,
+    plistexist_thresh, plistexist_var;
+extern _Thread_local int64_t plistoff_value, plistoff_cdvalue, plistoff_detvalue,
+    plistoff_thresh, plistoff_var;
 extern _Thread_local int64_t plistsize;
 extern _Thread_local unsigned int randseed;
 
 typedef struct {
   /* thresholds */
   float thresh; /* detect threshold (ADU) */
+  float dthresh; /* threshold in detection-statistic units */
   float mthresh; /* max. threshold (ADU) */
 
   /* # pixels */
@@ -112,10 +114,12 @@ typedef struct {
 
   /* flux */
   float fdflux; /* integrated ext. flux */
+  float detflux; /* integrated detection-statistic flux */
   float dflux; /* integrated det. flux */
   float flux; /* integrated mes. flux */
   float fluxerr; /* integrated variance */
   PIXTYPE fdpeak; /* peak intensity (ADU) */
+  PIXTYPE detpeak; /* peak detection statistic */
   PIXTYPE dpeak; /* peak intensity (ADU) */
   PIXTYPE peak; /* peak intensity (ADU) */
 
@@ -133,6 +137,7 @@ typedef struct {
   int64_t npix; /* number of pixels in pixel-list */
   pliststruct * plist; /* pointer to the pixel-list */
   PIXTYPE thresh; /* detection threshold */
+  PIXTYPE dthresh; /* threshold in detection-statistic units */
 } objliststruct;
 
 
@@ -198,4 +203,16 @@ int matched_filter(
     PIXTYPE * work,
     PIXTYPE * out,
     int noise_type
+);
+int matched_filter_const(
+    int64_t width,
+    int64_t height,
+    int64_t y,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    PIXTYPE noise,
+    const PIXTYPE * convolved,
+    PIXTYPE * work,
+    PIXTYPE * out
 );

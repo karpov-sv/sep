@@ -790,11 +790,14 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         array is supplied. ``'matched'`` (default) accounts for
         pixel-to-pixel noise in the filter kernel. ``'conv'`` is
         simple convolution of the data array, ignoring pixel-to-pixel
-        noise across the kernel.  ``'matched'`` should yield better
+        noise across the kernel. Scalar noise values use the same normalized
+        matched-filter statistic as constant noise arrays. ``'matched'``
+        should yield better
         detection of faint sources in areas of rapidly varying noise
         (such as found in coadded images made from semi-overlapping
-        exposures).  The two options are equivalent when noise is
-        constant.
+        exposures), and expresses the filtered threshold in S/N units.
+        ``'conv'`` retains the traditional SExtractor-style threshold
+        convention.
     deblend_nthresh : int, optional
         Number of thresholds used for object deblending. Default is 32.
     deblend_cont : float, optional
@@ -810,7 +813,8 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     deblend_method : {'threshold', 'watershed'} or int, optional
         Deblending algorithm. ``'threshold'`` (default) uses the traditional
         multi-threshold method. ``'watershed'`` seeds local maxima and applies
-        watershed assignment within each detection footprint.
+        watershed assignment within each detection footprint using the same
+        filtered detection statistic that created the footprint.
     clean : bool, optional
         Perform cleaning? Default is True.
     clean_param : float, optional
@@ -872,6 +876,19 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
     cdef sep_image im
     cdef np.int64_t[:] idbuf, countbuf
 
+    if not np.isfinite(thresh) or thresh <= 0.0:
+        raise ValueError("thresh must be finite and greater than zero")
+    if minarea < 1:
+        raise ValueError("minarea must be at least 1")
+    if deblend_nthresh < 1:
+        raise ValueError("deblend_nthresh must be at least 1")
+    if not np.isfinite(deblend_cont) or not 0.0 <= deblend_cont <= 1.0:
+        raise ValueError("deblend_cont must be finite and between 0 and 1")
+    if not np.isfinite(deblend_fwhm) or deblend_fwhm < 0.0:
+        raise ValueError("deblend_fwhm must be finite and non-negative")
+    if not np.isfinite(clean_param) or clean_param <= 0.0:
+        raise ValueError("clean_param must be finite and greater than zero")
+
     # parse arrays
     if type(segmentation_map) is np.ndarray:
         _parse_arrays(data, err, var, mask, segmentation_map, &im)
@@ -909,7 +926,16 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         kernelw = 0
         kernelh = 0
     else:
+        if (filter_kernel.ndim != 2 or filter_kernel.shape[0] == 0 or
+                filter_kernel.shape[1] == 0):
+            raise ValueError("filter_kernel must be a non-empty 2-d array")
+        if not np.all(np.isfinite(filter_kernel)):
+            raise ValueError("filter_kernel values must all be finite")
+        if np.sum(np.abs(filter_kernel), dtype=np.float64) == 0.0:
+            raise ValueError("filter_kernel must contain a nonzero value")
         kernelflt = filter_kernel.astype(np.float32)
+        if not np.all(np.isfinite(kernelflt)):
+            raise ValueError("filter_kernel values must be representable as float32")
         kernelptr = &kernelflt[0, 0]
         kernelw = kernelflt.shape[1]
         kernelh = kernelflt.shape[0]
@@ -930,6 +956,8 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
             raise ValueError("unknown deblend_method: {!r}".format(deblend_method))
     else:
         deblend_methodcode = int(deblend_method)
+        if deblend_methodcode not in (SEP_DEBLEND_THRESH, SEP_DEBLEND_WATERSHED):
+            raise ValueError("unknown deblend_method: {!r}".format(deblend_method))
 
     # If image has error info, the threshold is relative, otherwise
     # it is absolute.

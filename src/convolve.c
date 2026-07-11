@@ -220,3 +220,50 @@ int matched_filter(
 
   return RETURN_OK;
 }
+
+/* Normalize an already convolved line as a matched-filter S/N statistic for
+ * constant noise. The normalization is recomputed at image edges, where the
+ * kernel is truncated. */
+int matched_filter_const(
+    int64_t width,
+    int64_t height,
+    int64_t y,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    PIXTYPE noise,
+    const PIXTYPE * convolved,
+    PIXTYPE * work,
+    PIXTYPE * out
+) {
+  int64_t convw2, cx, cy, dcx, x, x0, x1, ky0, ky1;
+
+  if (!(noise > 0.0) || !isfinite(noise)) {
+    return UNKNOWN_NOISE_TYPE;
+  }
+
+  memset(work, 0, (size_t)width * sizeof(PIXTYPE));
+  convw2 = convw / 2;
+  ky0 = y < convh / 2 ? convh / 2 - y : 0;
+  ky1 = y + (convh - convh / 2) > height
+            ? height - y + convh / 2
+            : convh;
+
+  for (cy = ky0; cy < ky1; cy++) {
+    for (cx = 0; cx < convw; cx++) {
+      dcx = cx - convw2;
+      x0 = dcx >= 0 ? 0 : -dcx;
+      x1 = dcx >= 0 ? width - dcx : width;
+      for (x = x0; x < x1; x++) {
+        work[x] += conv[cy * convw + cx] * conv[cy * convw + cx];
+      }
+    }
+  }
+
+  for (x = 0; x < width; x++) {
+    out[x] = work[x] > 0.0
+                 ? convolved[x] / (noise * sqrt(work[x]))
+                 : -BIG;
+  }
+  return RETURN_OK;
+}
