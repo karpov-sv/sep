@@ -167,6 +167,10 @@ documentation improvements and minor feature additions are welcome via
 GitHub pull requests. For major features, it is best to discuss the change first
 via [GitHub Discussions](https://github.com/sep-developers/sep/discussions/).
 
+The package regression suite is in `test.py`. Larger performance and
+scientific-recovery diagnostics are documented in
+[benchmarks/README.md](benchmarks/README.md).
+
 
 Citation
 --------

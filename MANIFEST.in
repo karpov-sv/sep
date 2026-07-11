@@ -6,4 +6,5 @@ include pyproject.toml
 
 include src/*.[c,h,i]
 include sep.pyx
+recursive-include benchmarks *.py *.md
 exclude sep.c

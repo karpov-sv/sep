@@ -656,6 +656,21 @@ def test_extract_fwhm_compact_gaussian(fwhm):
     assert abs(objects["fwhm"][0] - fwhm) / fwhm < 0.1
 
 
+@pytest.mark.parametrize("fwhm", [1.2, 2.5, 5.0, 7.0])
+@pytest.mark.parametrize("phase", [0.15, 0.5, 0.85])
+def test_extract_fwhm_across_source_widths_and_phases(fwhm, phase):
+    """FWHM estimates remain accurate for broad and undersampled sources."""
+    x0 = np.array([24.0 + phase])
+    y0 = np.array([24.37])
+    image = _gaussian_scene((49, 49), x0, y0, fwhm, np.array([5000.0]))
+
+    objects = sep.extract(image, 5.0, clean=False, deblend_cont=1.0)
+
+    assert len(objects) == 1
+    assert np.isfinite(objects["fwhm"][0])
+    assert_allclose(objects["fwhm"][0], fwhm, rtol=0.06)
+
+
 def test_extract_fwhm_hotpixel_zero():
     image = np.zeros((11, 11))
     image[5, 5] = 1000.0
@@ -1243,6 +1258,62 @@ def test_sum_circle_optimal_group_halo_factor_order_invariant():
     assert np.all(flag_a == flag_b[::-1])
 
 
+def test_sum_circle_optimal_stable_across_group_boundary():
+    """Grouped fluxes stay accurate on both sides of the grouping cutoff."""
+    fwhm = 2.5
+    r = 2.0 * fwhm
+    truth = np.array([1000.0, 100.0])
+    errors = []
+
+    for separation_fwhm in [3.95, 4.0, 4.05]:
+        separation = separation_fwhm * fwhm
+        x0 = np.array([32.35 - separation / 2.0, 32.35 + separation / 2.0])
+        y0 = np.array([31.65, 31.65])
+        data = _gaussian_scene((65, 65), x0, y0, fwhm, truth)
+
+        flux, _, flag = sep.sum_circle_optimal(
+            data, x0, y0, r, fwhm, grouped=True, subpix=0
+        )
+        errors.append(np.max(np.abs(flux - truth) / truth))
+        assert np.all(flag == 0)
+        assert_allclose(flux, truth, rtol=1.0e-5)
+
+    assert np.max(np.abs(np.diff(errors))) < 1.0e-5
+
+
+def test_sum_circle_optimal_chain_translation_and_order_invariant():
+    """Localized long-chain solutions are insensitive to order and phase."""
+    fwhm = 2.5
+    r = 2.0 * fwhm
+    nsrc = 10
+    spacing = 3.95 * fwhm
+    truth = 700.0 + 70.0 * np.arange(nsrc)
+
+    for offset in [0.0, 1.3]:
+        x0 = 18.0 + offset + spacing * np.arange(nsrc)
+        y0 = np.full(nsrc, 31.4)
+        data = _gaussian_scene((64, 128), x0, y0, fwhm, truth)
+
+        flux, fluxerr, flag = sep.sum_circle_optimal(
+            data, x0, y0, r, fwhm, grouped=True, subpix=0
+        )
+        reverse = np.arange(nsrc)[::-1]
+        flux_rev, fluxerr_rev, flag_rev = sep.sum_circle_optimal(
+            data,
+            x0[reverse],
+            y0[reverse],
+            r,
+            fwhm,
+            grouped=True,
+            subpix=0,
+        )
+
+        assert_allclose(flux, truth, rtol=1.0e-5)
+        assert_allclose(flux, flux_rev[reverse], rtol=1.0e-12, atol=1.0e-10)
+        assert_allclose(fluxerr, fluxerr_rev[reverse], rtol=1.0e-12, atol=1.0e-10)
+        assert_equal(flag, flag_rev[reverse])
+
+
 def _sigma_clip_mean(values, sigma=3.0, maxiters=5):
     mask = np.ones(values.shape, dtype=bool)
     for _ in range(maxiters):
@@ -1305,6 +1376,24 @@ def test_stats_circann_matches_numpy_subpix1():
     assert_allclose(med[0], exp_med, rtol=1.0e-10, atol=1.0e-8)
     assert_allclose(mad_std[0], exp_mad_std, rtol=1.0e-10, atol=1.0e-7)
     assert_allclose(mean_clip[0], exp_clip, rtol=1.0e-10, atol=1.0e-8)
+    assert flag[0] == 0
+
+
+def test_stats_circann_clipping_rejects_source_contamination():
+    """Sigma clipping recovers a smooth background with bright annulus pixels."""
+    ygrid, xgrid = np.indices((65, 65))
+    x0 = y0 = 32.0
+    data = 100.0 + 0.2 * (xgrid - x0) - 0.1 * (ygrid - y0)
+    for ybad, xbad in [(32, 39), (32, 40), (39, 32), (26, 37)]:
+        data[ybad, xbad] += 1000.0
+
+    mean, _, median, _, mean_clip, flag = sep.stats_circann(
+        data, [x0], [y0], 6.0, 10.0, subpix=1, clip_sigma=3.0, clip_iters=5
+    )
+
+    assert mean[0] > 115.0
+    assert_allclose(median[0], 100.0, atol=0.1)
+    assert_allclose(mean_clip[0], 100.0, atol=0.1)
     assert flag[0] == 0
 
 
@@ -1572,6 +1661,64 @@ def test_extract_deblend_prunes_low_contrast_branches():
     assert len(objects) == 1
 
 
+@pytest.mark.parametrize(
+    "method,separation_fwhm,expected",
+    [
+        ("threshold", 1.0, 1),
+        ("threshold", 2.0, 2),
+        ("watershed", 1.0, 2),
+        ("watershed", 2.0, 2),
+    ],
+)
+def test_extract_deblend_pair_separation_matrix(method, separation_fwhm, expected):
+    """Controlled equal-flux pairs have stable merge and split behavior."""
+    fwhm = 3.0
+    separation = separation_fwhm * fwhm
+    xtrue = np.array([32.0 - separation / 2.0, 32.0 + separation / 2.0])
+    ytrue = np.array([32.0, 32.0])
+    data = _gaussian_scene((65, 65), xtrue, ytrue, fwhm, [3000.0, 3000.0])
+
+    objects = sep.extract(
+        data,
+        1.0,
+        minarea=3,
+        filter_kernel=None,
+        clean=False,
+        deblend_cont=0.005,
+        deblend_fwhm=fwhm if method == "watershed" else 0.0,
+        deblend_method=method,
+    )
+
+    assert len(objects) == expected
+    if expected == 2:
+        assert_allclose(np.sort(objects["x"]), xtrue, atol=0.5)
+
+
+@pytest.mark.parametrize("method", ["threshold", "watershed"])
+@pytest.mark.parametrize("flux_ratio", [0.3, 0.1])
+def test_extract_deblend_high_contrast_pair(method, flux_ratio):
+    """Resolvable faint companions survive next to a brighter source."""
+    fwhm = 3.0
+    xtrue = np.array([29.0, 35.0])
+    ytrue = np.array([32.0, 32.0])
+    flux = np.array([5000.0, 5000.0 * flux_ratio])
+    data = _gaussian_scene((65, 65), xtrue, ytrue, fwhm, flux)
+
+    objects = sep.extract(
+        data,
+        0.5,
+        minarea=3,
+        filter_kernel=None,
+        clean=False,
+        deblend_cont=0.005,
+        deblend_fwhm=fwhm if method == "watershed" else 0.0,
+        deblend_method=method,
+    )
+
+    assert len(objects) == 2
+    assert_allclose(np.sort(objects["x"]), xtrue, atol=0.5)
+
+
 def test_extract_watershed_centroids_follow_segment_moments():
     """
     Watershed-deblended centroids should match first moments of the assigned
@@ -1803,6 +1950,24 @@ def test_winpos_psf_array_matches_scalar_calls():
     assert_allclose(xb, xs, atol=1.0e-10)
     assert_allclose(yb, ys, atol=1.0e-10)
     assert_equal(flagb, flags)
+
+
+def test_winpos_isolated_sources_stable_across_subpixel_phases():
+    """Gaussian windowing converges for varied phases and initial offsets."""
+    fwhm = 3.0
+    sigma = fwhm / 2.354820045
+    xtrue = np.array([18.15, 32.50, 46.85])
+    ytrue = np.array([20.80, 33.25, 44.60])
+    flux = np.array([1200.0, 900.0, 1500.0])
+    data = _gaussian_scene((64, 64), xtrue, ytrue, fwhm, flux)
+    xinit = xtrue + np.array([0.45, -0.40, 0.35])
+    yinit = ytrue + np.array([-0.35, 0.30, -0.42])
+
+    xwin, ywin, flag = sep.winpos(data, xinit, yinit, sigma)
+
+    assert np.all(flag == 0)
+    assert_allclose(xwin, xtrue, atol=0.02)
+    assert_allclose(ywin, ytrue, atol=0.02)
 
 
 def test_winpos_segmented_close_pair_does_not_collapse():
