@@ -47,7 +47,7 @@ jobs:
       # for better testing and checking.
 
       - name: Install dependencies
-        run: python -m pip install setuptools twine numpy wheel cython build
+        run: python -m pip install setuptools twine numpy wheel build
 
       - name: Build sdist
         run: python -m build --sdist

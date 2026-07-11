@@ -113,8 +113,8 @@ Do **not** install sep-x or other third-party Python packages using
 
 **Install development version:**
 
-Building the development version (from github) requires Cython.
-Build and install in the usual place:
+Development builds use the checked-in Cython output. Cython is needed only
+when updating `sep.pyx`; otherwise build and install in the usual place:
 
 ```
 python -m pip install --editable .

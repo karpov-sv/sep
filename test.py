@@ -1402,15 +1402,27 @@ def test_aperture_bkgann_overlapping():
     Test bkgann functionality in circular & elliptical apertures.
     """
 
-    # If bkgann overlaps aperture exactly, result should be zero
-    # (with subpix=1)
+    # If bkgann overlaps aperture exactly, result should be zero with
+    # subpixel sampling of 1 and clipping disabled. Sigma clipping can
+    # intentionally reject a random annulus sample and change its mean.
     data = np.random.rand(*data_shape)
     r = 5.0
-    f, _, _ = sep.sum_circle(data, x, y, r, bkgann=(0.0, r), subpix=1)
+    f, _, _ = sep.sum_circle(
+        data, x, y, r, bkgann=(0.0, r), subpix=1, clip_iters=0
+    )
     assert_allclose(f, 0.0, rtol=0.0, atol=1.0e-13)
 
     f, _, _ = sep.sum_ellipse(
-        data, x, y, 2.0, 1.0, np.pi / 4.0, r=r, bkgann=(0.0, r), subpix=1
+        data,
+        x,
+        y,
+        2.0,
+        1.0,
+        np.pi / 4.0,
+        r=r,
+        bkgann=(0.0, r),
+        subpix=1,
+        clip_iters=0,
     )
     assert_allclose(f, 0.0, rtol=0.0, atol=1.0e-13)
 

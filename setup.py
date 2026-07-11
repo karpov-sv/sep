@@ -73,16 +73,18 @@ is_non_build = (
     or sys.argv[1] in ("egg_info", "clean", "help")
 )
 
-# extension module(s): only add if we actually need to build, because we need
-# to import numpy and cython to build, and we'd rather non-build commands
-# work when those dependencies are not installed.
+# Only add the extension module when building, so metadata commands work
+# without importing NumPy.
 if is_non_build:
     extensions = None
 else:
     import numpy
-    from Cython.Build import cythonize
 
-    sourcefiles = ["sep.pyx"] + glob(os.path.join("src", "*.c"))
+    # Build releases from the checked-in Cython output. Cythonizing sep.pyx
+    # during a tagged build changes sep.c's embedded build metadata, making
+    # setuptools_scm treat the checkout as dirty and emit a non-uploadable
+    # local version.
+    sourcefiles = ["sep.c"] + glob(os.path.join("src", "*.c"))
     headerfiles = glob(os.path.join("src", "*.h"))
     include_dirs = [numpy.get_include(), "src"]
     omp_compile_args, omp_link_args = _detect_openmp_flags()
@@ -101,9 +103,4 @@ else:
             extra_link_args=omp_link_args,
         )
     ]
-    extensions = cythonize(
-        extensions,
-        language_level=3,
-    )
-
 setup(ext_modules=extensions)
