@@ -7,7 +7,7 @@ import argparse
 import math
 
 import numpy as np
-import sep
+import sep_x as sep
 
 
 def gaussian_pixel_integral(dx, dy, sigma):

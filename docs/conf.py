@@ -12,12 +12,16 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
-"""The sphinx configuration file for the SEP documentation."""
+"""The Sphinx configuration file for the SEP-X documentation."""
 
 import os
 import sys
 
-import sep
+import sep_x as sep
+
+# The documentation uses the conventional local alias in examples and API
+# references, while the installed extension is uniquely named ``sep_x``.
+sys.modules["sep"] = sep
 
 try:
     from sphinx_astropy.conf.v2 import *
@@ -233,7 +237,7 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    ("index", "sep.tex", "sep Documentation", "Peter Watson", "manual"),
+    ("index", "sep_x.tex", "SEP-X Documentation", "Peter Watson", "manual"),
 ]
 
 # The name of an image file (relative to this directory) to place at the top of

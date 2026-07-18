@@ -7,7 +7,7 @@ import argparse
 import time
 
 import numpy as np
-import sep
+import sep_x as sep
 
 
 def make_image(size: int, nobj: int, background: float, noise: float, rng: np.random.Generator) -> np.ndarray:

@@ -10,7 +10,7 @@ import numpy as np
 from math import erf
 
 try:
-    import sep
+    import sep_x as sep
 except ImportError as exc:
     raise SystemExit("sep is required; build the extension first.") from exc
 

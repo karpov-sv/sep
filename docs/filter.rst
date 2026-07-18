@@ -8,7 +8,7 @@ shape. This is controlled using the ``filter_kernel`` keyword in
 
 .. code-block:: python
 
-    import sep
+    import sep_x as sep
 
     kernel = np.array([[1., 2., 3., 2., 1.],
                        [2., 3., 5., 3., 2.],

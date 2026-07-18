@@ -57,13 +57,16 @@ SEP-X is an independently maintained fork of
 Python and C APIs where practical, but has substantial additional extraction,
 photometry, PSF-fitting, and centroiding functionality.
 
-The published distribution is named ``sep-x`` while the import remains
-``sep`` and the C library remains ``libsep`` for source compatibility. Do not
-install SEP-X and upstream ``sep`` in the same environment: both provide the
-``sep`` extension. Replace upstream SEP before installing SEP-X::
+The published distribution is named ``sep-x`` and its Python extension is
+``sep_x``. SEP-X and upstream ``sep`` can therefore be installed in the same
+Python environment. To use SEP-X with the familiar local API name::
 
-    python -m pip uninstall sep
-    python -m pip install sep-x
+    import sep_x as sep
+
+This separation applies to Python only. SEP-X retains the C library name
+``libsep`` and header name ``sep.h`` for C source compatibility. Do not
+install SEP-X and upstream SEP's C libraries into the same prefix or link both
+into one process.
 
 Major changes include robust local-background estimation, grouped optimal
 extraction, a PSF modelling and fitting API, enhanced detection and

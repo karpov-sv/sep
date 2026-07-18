@@ -12,7 +12,7 @@ import pytest
 from numpy.lib import recfunctions as rfn
 from numpy.testing import assert_allclose, assert_approx_equal, assert_equal
 
-import sep
+import sep_x as sep
 
 # unicode_literals doesn't play well with numpy dtype field names
 

@@ -20,15 +20,19 @@ array-oriented Python and C APIs where practical, but it has diverged
 substantially and is not a drop-in replacement for every upstream release.
 
 The package published by this repository is named **`sep-x`**; its Python
-module remains **`sep`** and its C library remains **`libsep`** for source
-compatibility. Consequently, do not install `sep-x` alongside upstream `sep`
-in the same environment: both distributions provide the `sep` extension.
-Replace upstream SEP explicitly instead:
+extension is **`sep_x`**. The distinct Python extension means SEP-X and
+upstream `sep` can be installed in the same environment without one
+shadowing the other. To keep existing analysis code readable, import SEP-X
+using the familiar local name:
 
 ```
-python -m pip uninstall sep
-python -m pip install sep-x
+import sep_x as sep
 ```
+
+This separation applies to Python only. SEP-X deliberately retains the C
+library name **`libsep`** and header name **`sep.h`** for C source
+compatibility. Do not install SEP-X and upstream SEP's C libraries into the
+same prefix or link both into one process.
 
 Major SEP-X additions and changes include:
 
@@ -82,7 +86,7 @@ instructions.
 Python
 ------
 
-**Documentation:** http://sep.readthedocs.io
+**Documentation:** [docs/](docs/)
 
 **Requirements:**
 

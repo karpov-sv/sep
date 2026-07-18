@@ -90,7 +90,7 @@ else:
     omp_compile_args, omp_link_args = _detect_openmp_flags()
     extensions = [
         Extension(
-            "sep",
+            "sep_x",
             sourcefiles,
             include_dirs=include_dirs,
             depends=headerfiles,

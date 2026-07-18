@@ -9,7 +9,7 @@ from math import erf
 
 import numpy as np
 
-import sep
+import sep_x as sep
 
 
 def erf_vec(values: np.ndarray) -> np.ndarray:
