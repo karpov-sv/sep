@@ -660,7 +660,8 @@ static int optimal_group_solve_compact(
     const double *r2, const double *r_in2, const double *r_out2,
     const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
     const int64_t *symin_arr, const int64_t *symax_arr,
-    const unsigned char *trunc_arr, const int *id, int subpix, short inflag,
+    const unsigned char *trunc_arr, const int *id, double background,
+    int subpix, short inflag,
     int gcount, const int *gidx, const int *fixed_idx, int fixed_count,
     const double *fixed_flux, opt_group_workspace *ws, double *sum,
     double *sumerr, short *flag) {
@@ -811,7 +812,7 @@ static int optimal_group_solve_compact(
       if (ismasked) continue;
 
       gweight[pidx] = 1.0 / sqrt(varpix);
-      gdata[pidx] = pix * gweight[pidx];
+      gdata[pidx] = (pix - background) * gweight[pidx];
     }
   }
 
@@ -943,7 +944,8 @@ static int optimal_group_solve_exact(
     const double *r2, const double *r_in2, const double *r_out2,
     const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
     const int64_t *symin_arr, const int64_t *symax_arr,
-    const unsigned char *trunc_arr, const int *id, int subpix, short inflag,
+    const unsigned char *trunc_arr, const int *id, double background,
+    int subpix, short inflag,
     int gcount, const int *gidx, const int *fixed_idx, int fixed_count,
     const double *fixed_flux, double *sum, double *sumerr, double *area,
     short *flag) {
@@ -1126,7 +1128,7 @@ static int optimal_group_solve_exact(
 
       if (ismasked || union_overlap <= 0.0) continue;
 
-      pix_corr = pix;
+      pix_corr = pix - background;
       if (fixed_idx && fixed_flux) {
         for (i = 0; i < fixed_count; i++) {
           int idx = fixed_idx[i];
@@ -1229,6 +1231,7 @@ static int optimal_group_solve_localized(
     const double *sigma_arr, const int64_t *sxmin_arr, const int64_t *sxmax_arr,
     const int64_t *symin_arr, const int64_t *symax_arr,
     const unsigned char *trunc_arr, const int *id, double halo_factor,
+    double background,
     int subpix, short inflag, int gcount, const int *gidx, double *sum,
     double *sumerr, double *area, short *flag) {
   int status = RETURN_OK;
@@ -1462,7 +1465,8 @@ static int optimal_group_solve_localized(
 
                     status = optimal_group_solve_compact(
                         im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr,
-                        sxmax_arr, symin_arr, symax_arr, trunc_arr, id, subpix,
+                        sxmax_arr, symin_arr, symax_arr, trunc_arr, id, background,
+                        subpix,
                         inflag, sub_active_count, sub_active, sub_fixed_idx,
                         sub_fixed_count, work_flux, &ws, tmp_flux, tmp_fluxerr,
                         tmp_flag);
@@ -1512,7 +1516,7 @@ static int optimal_group_solve_localized(
 
               status = optimal_group_solve_compact(
                   im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
-                  symin_arr, symax_arr, trunc_arr, id, subpix, inflag,
+                  symin_arr, symax_arr, trunc_arr, id, background, subpix, inflag,
                   active_count, active_idx, fixed_idx, fixed_count, work_flux,
                   &ws, tmp_flux, tmp_fluxerr, tmp_flag);
               if (status != RETURN_OK) goto cleanup;
@@ -1614,7 +1618,8 @@ static int optimal_group_solve_localized(
 
       status = optimal_group_solve_exact(
           im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
-          symin_arr, symax_arr, trunc_arr, id, subpix, inflag, active_count,
+          symin_arr, symax_arr, trunc_arr, id, background, subpix, inflag,
+          active_count,
           active_idx, fixed_idx, fixed_count, work_flux, tmp_flux, tmp_fluxerr,
           area, tmp_flag);
       if (status != RETURN_OK) goto cleanup;
@@ -1688,7 +1693,7 @@ cleanup:
 /*****************************************************************************/
 /* circular aperture with optimal extraction */
 
-int sep_sum_circle_optimal(
+static int sum_circle_optimal_impl(
     const sep_image * im,
     double x,
     double y,
@@ -1700,11 +1705,12 @@ int sep_sum_circle_optimal(
     double * sum,
     double * sumerr,
     double * area,
+    double * bkgscale,
     short * flag
 ) {
   PIXTYPE pix, varpix;
   double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
-  double r2, r_in2, r_out2, sigma, num, den, totarea, maskarea;
+  double r2, r_in2, r_out2, sigma, num, den, bkgnum, totarea, maskarea;
   double psf, var;
   int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize, ssize;
   int ismasked, status;
@@ -1720,7 +1726,7 @@ int sep_sum_circle_optimal(
   }
 
   size = esize = msize = ssize = 0;
-  num = den = totarea = maskarea = 0.0;
+  num = den = bkgnum = totarea = maskarea = 0.0;
   datat = maskt = segt = NULL;
   errort = im->noise;
   *flag = 0;
@@ -1849,6 +1855,7 @@ int sep_sum_circle_optimal(
               if (var_eff > 0.0) {
                 num += psf * pix_eff / var_eff;
                 den += psf * psf / var_eff;
+                bkgnum += psf * scale / var_eff;
               } else {
                 *flag |= SEP_APER_HASMASKED;
                 maskarea += overlap;
@@ -1878,6 +1885,7 @@ int sep_sum_circle_optimal(
       *sum = 0.0;
       *sumerr = 0.0;
       *area = 0.0;
+      if (bkgscale) *bkgscale = 0.0;
       return status;
     } else if (inflag & SEP_MASK_IGNORE) {
       totarea -= maskarea;
@@ -1889,6 +1897,7 @@ int sep_sum_circle_optimal(
     *sum = 0.0;
     *sumerr = 0.0;
     *area = 0.0;
+    if (bkgscale) *bkgscale = 0.0;
     return status;
   }
 
@@ -1899,8 +1908,46 @@ int sep_sum_circle_optimal(
   }
   *sumerr = sqrt(var);
   *area = totarea;
+  if (bkgscale) *bkgscale = bkgnum / den;
 
   return status;
+}
+
+int sep_sum_circle_optimal(
+    const sep_image * im,
+    double x,
+    double y,
+    double r,
+    double fwhm,
+    int id,
+    int subpix,
+    short inflag,
+    double * sum,
+    double * sumerr,
+    double * area,
+    short * flag
+) {
+  return sum_circle_optimal_impl(im, x, y, r, fwhm, id, subpix, inflag, sum,
+                                 sumerr, area, NULL, flag);
+}
+
+int sep_sum_circle_optimal_bkgscale(
+    const sep_image * im,
+    double x,
+    double y,
+    double r,
+    double fwhm,
+    int id,
+    int subpix,
+    short inflag,
+    double * sum,
+    double * sumerr,
+    double * area,
+    double * bkgscale,
+    short * flag
+) {
+  return sum_circle_optimal_impl(im, x, y, r, fwhm, id, subpix, inflag, sum,
+                                 sumerr, area, bkgscale, flag);
 }
 
 /*****************************************************************************/
@@ -2089,18 +2136,25 @@ static int sep_sum_circle_optimal_multi_impl(
 
     if (gcount == 1) {
       int idx = gidx[0];
-      status = sep_sum_circle_optimal(
+      double bkgscale_tmp = 0.0;
+      status = sep_sum_circle_optimal_bkgscale(
           im, x[idx], y[idx], r[idx], fwhm[idx], id ? id[idx] : 0, subpix,
-          inflag, &sum[idx], &sumerr[idx], &area[idx], &flag[idx]);
+          inflag, &sum[idx], &sumerr[idx], &area[idx], &bkgscale_tmp,
+          &flag[idx]);
+      if (status == RETURN_OK && use_bkg) {
+        sum[idx] -= group_mean * bkgscale_tmp;
+      }
     } else if (gcount <= OPT_GROUP_EXACT_MAX) {
       status = optimal_group_solve_exact(
           im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
-          symin_arr, symax_arr, trunc_arr, id, subpix, inflag, gcount, gidx,
+          symin_arr, symax_arr, trunc_arr, id, group_mean, subpix, inflag,
+          gcount, gidx,
           NULL, 0, NULL, sum, sumerr, area, flag);
     } else {
       status = optimal_group_solve_localized(
           im, x, y, r, r2, r_in2, r_out2, sigma_arr, sxmin_arr, sxmax_arr,
-          symin_arr, symax_arr, trunc_arr, id, halo_factor, subpix, inflag,
+          symin_arr, symax_arr, trunc_arr, id, halo_factor, group_mean, subpix,
+          inflag,
           gcount, gidx, sum, sumerr, area, flag);
     }
     if (status != RETURN_OK) goto cleanup;
@@ -2110,9 +2164,15 @@ static int sep_sum_circle_optimal_multi_impl(
         int idx = gidx[i];
         if (area[idx] > 0.0) {
           double berr;
-          sum[idx] -= group_mean * area[idx];
           if (group_err > 0.0) {
-            berr = group_err * area[idx];
+            double bkgscale, flux_tmp, fluxerr_tmp, area_tmp;
+            short flag_tmp;
+            status = sep_sum_circle_optimal_bkgscale(
+                im, x[idx], y[idx], r[idx], fwhm[idx], id ? id[idx] : 0,
+                subpix, inflag, &flux_tmp, &fluxerr_tmp, &area_tmp, &bkgscale,
+                &flag_tmp);
+            if (status != RETURN_OK) goto cleanup;
+            berr = group_err * bkgscale;
             sumerr[idx] = sqrt(sumerr[idx] * sumerr[idx] + berr * berr);
           }
         }

@@ -1062,6 +1062,51 @@ def test_sum_circle_optimal_clean_image_no_mask_flag():
     assert np.all(flag == 0)
 
 
+def test_sum_circle_optimal_bkgann_uses_psf_effective_area():
+    """A local sky level must be removed through the optimal PSF weights."""
+    shape = (81, 81)
+    sigma = 1.6
+    fwhm = 2.355 * sigma
+    r = 1.5 * fwhm
+    x0 = y0 = 40.0
+    sky = 20.0
+    source_flux = 1000.0
+    yy, xx = np.indices(shape)
+    data = sky + source_flux / (2.0 * np.pi * sigma**2) * np.exp(
+        -((xx - x0) ** 2 + (yy - y0) ** 2) / (2.0 * sigma**2)
+    )
+
+    local, _, _ = sep.sum_circle_optimal(
+        data, [x0], [y0], r, fwhm, bkgann=(6.0 * sigma, 9.0 * sigma),
+        clip_iters=0,
+    )
+    reference, _, _ = sep.sum_circle_optimal(data - sky, [x0], [y0], r, fwhm)
+
+    assert_allclose(local, reference, rtol=0.0, atol=2.0e-5)
+
+
+def test_sum_circle_optimal_grouped_bkgann_subtracts_before_solving():
+    """A shared local sky must not bias a simultaneous PSF fit."""
+    shape = (100, 100)
+    fwhm = 3.0
+    r = 6.0
+    sky = 20.0
+    x0 = np.array([40.2, 42.4])
+    y0 = np.array([40.1, 40.6])
+    true_flux = np.array([1000.0, 200.0])
+    data = _gaussian_scene(shape, x0, y0, fwhm, true_flux)
+
+    reference, _, _ = sep.sum_circle_optimal(
+        data, x0, y0, r, fwhm, grouped=True, subpix=0
+    )
+    local, _, _ = sep.sum_circle_optimal(
+        data + sky, x0, y0, r, fwhm, grouped=True, subpix=0,
+        bkgann=(15.0, 20.0), clip_iters=0,
+    )
+
+    assert_allclose(local, reference, rtol=0.0, atol=2.0e-5)
+
+
 def test_sum_circle_optimal_grouped_large_component_scalar_gaussian():
     shape = (220, 220)
     rng = np.random.default_rng(4)

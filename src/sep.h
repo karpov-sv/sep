@@ -399,6 +399,26 @@ SEP_API int sep_sum_circle_optimal(
     short * flag
 );
 
+/* As sep_sum_circle_optimal(), additionally returning the response of the
+ * fitted flux to a spatially constant image level. This is the effective
+ * area to use when subtracting a local background from optimal photometry.
+ */
+SEP_API int sep_sum_circle_optimal_bkgscale(
+    const sep_image * image,
+    double x,
+    double y,
+    double r,
+    double fwhm,
+    int id,
+    int subpix,
+    short inflags,
+    double * sum,
+    double * sumerr,
+    double * area,
+    double * bkgscale,
+    short * flag
+);
+
 /* Optimal extraction for multiple circular apertures with auto-grouping.
  *
  * Objects whose apertures overlap are solved simultaneously.

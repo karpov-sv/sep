@@ -189,6 +189,12 @@ cdef extern from "sep.h":
                                double *sum, double *sumerr, double *area,
                                short *flag)
 
+    int sep_sum_circle_optimal_bkgscale(const sep_image *image,
+                                        double x, double y, double r, double fwhm,
+                                        int id, int subpix, short inflags,
+                                        double *sum, double *sumerr, double *area,
+                                        double *bkgscale, short *flag)
+
     int sep_sum_circle_optimal_multi(const sep_image *image,
                                      double *x, double *y, double *r,
                                      double *fwhm, np.int64_t n,
@@ -1340,7 +1346,7 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
     ``group_radius_factor``.
     """
 
-    cdef double flux1, fluxerr1, area1
+    cdef double flux1, fluxerr1, area1, bkgscale1
     cdef double bkgflux, bkgfluxerr, bkgarea
     cdef double mean, std, med, mad_std, mean_clip
     cdef short flag1, bkgflag
@@ -1596,14 +1602,14 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
 
         it = np.broadcast(x, y, r, fwhm, rin, rout, seg_id, sum, sumerr, flag)
         while np.PyArray_MultiIter_NOTDONE(it):
-            status = sep_sum_circle_optimal(
+            status = sep_sum_circle_optimal_bkgscale(
                 &im,
                 (<double*>np.PyArray_MultiIter_DATA(it, 0))[0],
                 (<double*>np.PyArray_MultiIter_DATA(it, 1))[0],
                 (<double*>np.PyArray_MultiIter_DATA(it, 2))[0],
                 (<double*>np.PyArray_MultiIter_DATA(it, 3))[0],
                 (<int*>np.PyArray_MultiIter_DATA(it, 6))[0],
-                subpix, 0, &flux1, &fluxerr1, &area1, &flag1)
+                subpix, 0, &flux1, &fluxerr1, &area1, &bkgscale1, &flag1)
             _assert_ok(status)
 
             if clip_iters == 0:
@@ -1659,9 +1665,9 @@ def sum_circle_optimal(np.ndarray data not None, x, y, r, fwhm,
                         f"{np.PyArray_MultiIter_INDEX(it)}."
                     )
 
-            if area1 > 0:
-                flux1 -= mean_clip * area1
-                bkgfluxerr = bkgfluxerr / bkgarea * area1
+            if bkgscale1 > 0:
+                flux1 -= mean_clip * bkgscale1
+                bkgfluxerr = bkgfluxerr / bkgarea * bkgscale1
                 fluxerr1 = sqrt(fluxerr1*fluxerr1 + bkgfluxerr*bkgfluxerr)
             (<double*>np.PyArray_MultiIter_DATA(it, 7))[0] = flux1
             (<double*>np.PyArray_MultiIter_DATA(it, 8))[0] = fluxerr1
