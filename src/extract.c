@@ -67,6 +67,7 @@ int sortit(
     double deblend_mincont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     double gain,
     deblendctx * deblendctx
 );
@@ -375,6 +376,7 @@ int sep_extract(
     double deblend_cont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     int clean_flag,
     double clean_param,
     sep_catalog ** catalog
@@ -392,6 +394,7 @@ int sep_extract(
       deblend_cont,
       deblend_fwhm,
       deblend_method,
+      deblend_saddle,
       clean_flag,
       clean_param,
       1,
@@ -412,6 +415,7 @@ int sep_extract_with_pixels(
     double deblend_cont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     int clean_flag,
     double clean_param,
     int include_pixels,
@@ -1013,6 +1017,7 @@ int sep_extract_with_pixels(
                       deblend_cont,
                       deblend_fwhm,
                       deblend_method,
+                      deblend_saddle,
                       image->gain,
                       &deblendctx
                   );
@@ -1184,6 +1189,7 @@ int sortit(
     double deblend_mincont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     double gain,
     deblendctx * deblendctx
 ) {
@@ -1227,6 +1233,7 @@ int sortit(
       deblend_mincont,
       deblend_fwhm,
       deblend_method,
+      deblend_saddle,
       minarea,
       deblendctx
   );

@@ -177,7 +177,10 @@ typedef struct {
 
 int allocdeblend(int deblend_nthresh, int64_t w, int64_t h, deblendctx *);
 void freedeblend(deblendctx *);
-int deblend(objliststruct *, objliststruct *, int, double, double, int, int, deblendctx *);
+int deblend(
+    objliststruct *, objliststruct *, int, double, double, int, double, int,
+    deblendctx *
+);
 
 /*int addobjshallow(objstruct *, objliststruct *);
 int rmobjshallow(int, objliststruct *);

@@ -71,6 +71,8 @@ All changes here are transparent to users of the Python interface.
    ``int64_t``.
  - Added ``deblend_fwhm`` parameter to enable fixed-PSF deblending.
  - Added ``deblend_method`` parameter to select deblending algorithm.
+ - Added ``deblend_saddle`` parameter to merge low-prominence watershed
+   basins using the peak-to-saddle depth in detection-statistic units.
  - Added ``fwhm`` output field to ``sep_catalog``.
 
 .. c:function:: int sep_sum_circann_multi()

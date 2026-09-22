@@ -56,6 +56,7 @@ static int deblend_watershed(
     objliststruct *,
     double,
     double,
+    double,
     int
 );
 
@@ -113,6 +114,7 @@ int deblend(
     double deblend_mincont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     int minarea,
     deblendctx * ctx
 ) {
@@ -130,7 +132,12 @@ int deblend(
 
   if (deblend_method == SEP_DEBLEND_WATERSHED) {
     return deblend_watershed(
-        objlistin, objlistout, deblend_mincont, deblend_fwhm, minarea
+        objlistin,
+        objlistout,
+        deblend_mincont,
+        deblend_fwhm,
+        deblend_saddle,
+        minarea
     );
   }
 
@@ -348,13 +355,14 @@ static int deblend_watershed(
     objliststruct * objlistout,
     double deblend_mincont,
     double deblend_fwhm,
+    double deblend_saddle,
     int minarea
 ) {
   objstruct * obj;
   pliststruct * pixel, *pixt, *pixt2;
   objliststruct seglist;
   double total_flux, best_d2, dx, dy;
-  float *valmap, *peakx, *peaky, *peakval;
+  float *valmap, *peakx, *peaky, *peakval, *saddle_max;
   double *flux;
   int64_t *pixpos;
   int64_t *peakidx;
@@ -394,6 +402,7 @@ static int deblend_watershed(
     pixpos = NULL;
     peakidx = NULL;
     peakx = peaky = peakval = NULL;
+    saddle_max = NULL;
     flux = NULL;
     npix = NULL;
     keep = NULL;
@@ -645,6 +654,56 @@ static int deblend_watershed(
       }
     }
 
+    /* For every watershed basin, find the highest level at which it
+     * touches another basin.  The difference from its peak is its
+     * topographic prominence in the detection-statistic image. */
+    if (deblend_saddle > 0.0 && isfinite(deblend_saddle)) {
+      if (!(saddle_max = (float *)malloc((size_t)(nlabels + 1) * sizeof(float)))) {
+        status = MEMORY_ALLOC_ERROR;
+        goto obj_cleanup;
+      }
+      for (i = 0; i <= nlabels; i++) {
+        saddle_max[i] = -BIG;
+      }
+      for (i = 0; i < count; i++) {
+        int64_t xx, yy;
+        idx = pixpos[i];
+        j = label[idx];
+        if (j <= 0) {
+          continue;
+        }
+        xx = idx % subw;
+        yy = idx / subw;
+        for (int dy_i = -1; dy_i <= 1; dy_i++) {
+          for (int dx_i = -1; dx_i <= 1; dx_i++) {
+            int64_t nx = xx + dx_i;
+            int64_t ny = yy + dy_i;
+            int64_t nidx;
+            int nlab;
+            float saddle;
+            if (dx_i == 0 && dy_i == 0) {
+              continue;
+            }
+            if (nx < 0 || ny < 0 || nx >= subw || ny >= subh) {
+              continue;
+            }
+            nidx = idx + dx_i + dy_i * subw;
+            nlab = label[nidx];
+            if (nlab <= 0 || nlab == j) {
+              continue;
+            }
+            saddle = valmap[idx] < valmap[nidx] ? valmap[idx] : valmap[nidx];
+            if (saddle > saddle_max[j]) {
+              saddle_max[j] = saddle;
+            }
+            if (saddle > saddle_max[nlab]) {
+              saddle_max[nlab] = saddle;
+            }
+          }
+        }
+      }
+    }
+
     total_flux = 0.0;
     for (i = 1; i <= nlabels; i++) {
       total_flux += flux[i];
@@ -655,6 +714,18 @@ static int deblend_watershed(
       if (npix[i] >= deb_minarea && flux[i] >= total_flux * deblend_mincont) {
         keep[i] = 1;
         nkeep++;
+      }
+    }
+
+    if (saddle_max) {
+      for (i = 1; i <= nlabels; i++) {
+        if (keep[i] && peakval[i] - saddle_max[i] < deblend_saddle) {
+          keep[i] = 0;
+        }
+      }
+      nkeep = 0;
+      for (i = 1; i <= nlabels; i++) {
+        nkeep += keep[i];
       }
     }
 
@@ -787,6 +858,7 @@ static int deblend_watershed(
     free(peakx);
     free(peaky);
     free(peakval);
+    free(saddle_max);
     free(flux);
     free(npix);
     free(keep);

@@ -242,6 +242,51 @@ def _gaussian_scene(shape, x, y, fwhm, flux):
     return image
 
 
+def _pairwise_precision_recall(prediction, truth, footprint):
+    """Return label-invariant pixel-pair precision and recall."""
+    predicted_labels = prediction[footprint]
+    truth_labels = truth[footprint]
+
+    def pair_count(labels):
+        _, counts = np.unique(labels, return_counts=True)
+        return np.sum(counts * (counts - 1) // 2, dtype=np.int64)
+
+    _, joint_counts = np.unique(
+        np.stack((predicted_labels, truth_labels)), axis=1, return_counts=True
+    )
+    true_positive = np.sum(joint_counts * (joint_counts - 1) // 2, dtype=np.int64)
+    predicted_pairs = pair_count(predicted_labels)
+    truth_pairs = pair_count(truth_labels)
+    return true_positive / predicted_pairs, true_positive / truth_pairs
+
+
+def _noisy_gaussian_pair(shape, separation_fwhm, flux_ratio, fwhm, amplitude, seed):
+    """Return a noisy pair plus its component-based reference segmentation."""
+    yy, xx = np.indices(shape)
+    sigma = fwhm / 2.354820045
+    separation = separation_fwhm * fwhm
+    x0 = shape[1] / 2.0
+    y0 = shape[0] / 2.0
+    components = np.array(
+        [
+            amplitude
+            * np.exp(
+                -((xx - (x0 - separation / 2.0)) ** 2 + (yy - y0) ** 2)
+                / (2.0 * sigma**2)
+            ),
+            amplitude
+            * flux_ratio
+            * np.exp(
+                -((xx - (x0 + separation / 2.0)) ** 2 + (yy - y0) ** 2)
+                / (2.0 * sigma**2)
+            ),
+        ]
+    )
+    image = components.sum(axis=0)
+    image += np.random.default_rng(seed).normal(size=shape)
+    return image.astype(np.float32), components.argmax(axis=0) + 1
+
+
 # -----------------------------------------------------------------------------
 # Test versus Source Extractor results
 
@@ -643,6 +688,56 @@ def test_extract_watershed_uses_filtered_detection_plane():
 
     assert len(objects) == 1
     assert objects["npix"][0] > 100
+
+
+def test_extract_watershed_prominence_pairwise_validation_grid():
+    """Validate prominence merging with PSF-scaled, label-invariant pair scores."""
+    fwhm = 3.0
+    sigma = fwhm / 2.354820045
+    ky, kx = np.mgrid[-6:7, -6:7]
+    kernel = np.exp(-(kx**2 + ky**2) / (2.0 * sigma**2)).astype(np.float32)
+
+    def extract_pair(separation_fwhm, flux_ratio, prominence):
+        image, truth = _noisy_gaussian_pair(
+            (81, 81), separation_fwhm, flux_ratio, fwhm, 20.0, seed=2
+        )
+        objects, segmap = sep.extract(
+            image,
+            4.0,
+            err=1.0,
+            minarea=3,
+            filter_kernel=kernel,
+            clean=False,
+            deblend_cont=0.001,
+            deblend_method="watershed",
+            deblend_saddle=prominence,
+            segmentation_map=True,
+        )
+        footprint = segmap > 0
+        return objects, _pairwise_precision_recall(segmap, truth, footprint)
+
+    # This grid follows the paper's controlled-pair design: separation is in
+    # PSF FWHM and the flux ratio spans equal and unequal pairs. The current
+    # threshold is intentionally evaluated rather than assumed to be universal.
+    close_split, close_scores = extract_pair(1.45, 1.0, prominence=0.0)
+    close_merged, close_merged_scores = extract_pair(1.45, 1.0, prominence=4.0)
+    resolved_split, resolved_scores = extract_pair(1.55, 1.0, prominence=0.0)
+    resolved_prominent, resolved_prominent_scores = extract_pair(
+        1.55, 1.0, prominence=4.0
+    )
+    unequal_split, unequal_scores = extract_pair(2.0, 0.3, prominence=0.0)
+
+    assert len(close_split) == 2
+    assert len(close_merged) == 1
+    assert close_scores[0] > close_merged_scores[0]
+    assert close_merged_scores[1] == 1.0
+
+    assert len(resolved_split) == len(resolved_prominent) == 2
+    assert_allclose(resolved_scores, resolved_prominent_scores, rtol=0.0, atol=0.0)
+    assert min(resolved_scores) > 0.97
+
+    assert len(unequal_split) == 2
+    assert min(unequal_scores) > 0.8
 
 
 @pytest.mark.parametrize("fwhm", [1.0, 1.2, 1.4, 1.6])
@@ -1859,6 +1954,7 @@ def test_extract_watershed_peak_relabel_preserves_brightness_order():
         {"deblend_cont": -0.1},
         {"deblend_cont": 1.1},
         {"deblend_fwhm": -1.0},
+        {"deblend_saddle": -1.0},
         {"clean_param": 0.0},
         {"filter_kernel": np.zeros((3, 3), dtype=np.float32)},
     ],

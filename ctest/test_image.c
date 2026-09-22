@@ -293,6 +293,7 @@ int main(int argc, char ** argv) {
       1.0,
       0.0,
       SEP_DEBLEND_THRESH,
+      0.0,
       1,
       1.0,
       &catalog

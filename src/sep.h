@@ -305,6 +305,7 @@ SEP_API int sep_extract(
     double deblend_cont, /* min. deblending contrast    [0.005] */
     double deblend_fwhm, /* deblend PSF FWHM (pixels)      [0.0] */
     int deblend_method, /* deblending method              [0] */
+    double deblend_saddle, /* watershed min. peak-saddle prominence [0.0] */
     int clean_flag, /* perform cleaning?               [1] */
     double clean_param, /* clean parameter               [1.0] */
     sep_catalog ** catalog
@@ -328,6 +329,7 @@ SEP_API int sep_extract_with_pixels(
     double deblend_cont,
     double deblend_fwhm,
     int deblend_method,
+    double deblend_saddle,
     int clean_flag,
     double clean_param,
     int include_pixels,

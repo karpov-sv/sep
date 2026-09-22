@@ -156,6 +156,7 @@ cdef extern from "sep.h":
                     double deblend_cont,
                     double deblend_fwhm,
                     int deblend_method,
+                    double deblend_saddle,
                     int clean_flag,
                     double clean_param,
                     sep_catalog **catalog)
@@ -171,6 +172,7 @@ cdef extern from "sep.h":
                                 double deblend_cont,
                                 double deblend_fwhm,
                                 int deblend_method,
+                                double deblend_saddle,
                                 int clean_flag,
                                 double clean_param,
                                 int include_pixels,
@@ -750,12 +752,12 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
             int deblend_nthresh=32, double deblend_cont=0.005,
             bint clean=True, double clean_param=1.0,
             segmentation_map=None, double deblend_fwhm=0.0,
-            deblend_method='threshold'):
+            deblend_method='threshold', double deblend_saddle=0.0):
     """extract(data, thresh, err=None, mask=None, minarea=5,
                filter_kernel=default_kernel, filter_type='matched',
                deblend_nthresh=32, deblend_cont=0.005, clean=True,
                clean_param=1.0, segmentation_map=False, deblend_fwhm=0.0,
-               deblend_method='threshold')
+               deblend_method='threshold', deblend_saddle=0.0)
 
     Extract sources from an image.
 
@@ -821,6 +823,11 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         multi-threshold method. ``'watershed'`` seeds local maxima and applies
         watershed assignment within each detection footprint using the same
         filtered detection statistic that created the footprint.
+    deblend_saddle : float, optional
+        Minimum peak-to-saddle prominence for a watershed basin. The
+        prominence is measured in the watershed detection-statistic units;
+        with matched filtering and an error input, these are S/N units.
+        Set to zero (the default) to disable prominence merging.
     clean : bool, optional
         Perform cleaning? Default is True.
     clean_param : float, optional
@@ -892,6 +899,8 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         raise ValueError("deblend_cont must be finite and between 0 and 1")
     if not np.isfinite(deblend_fwhm) or deblend_fwhm < 0.0:
         raise ValueError("deblend_fwhm must be finite and non-negative")
+    if not np.isfinite(deblend_saddle) or deblend_saddle < 0.0:
+        raise ValueError("deblend_saddle must be finite and non-negative")
     if not np.isfinite(clean_param) or clean_param <= 0.0:
         raise ValueError("clean_param must be finite and greater than zero")
 
@@ -977,7 +986,7 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
                                      thresh, thresh_type, minarea,
                                      kernelptr, kernelw, kernelh, filter_typecode,
                                      deblend_nthresh, deblend_cont, deblend_fwhm,
-                                     deblend_methodcode,
+                                     deblend_methodcode, deblend_saddle,
                                      clean, clean_param, include_pixels,
                                      &catalog)
     _assert_ok(status)
