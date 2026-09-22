@@ -362,13 +362,13 @@ static int deblend_watershed(
   pliststruct * pixel, *pixt, *pixt2;
   objliststruct seglist;
   double total_flux, best_d2, dx, dy;
-  float *valmap, *peakx, *peaky, *peakval, *saddle_max;
+  float *valmap, *peakx, *peaky, *peakval, *saddle_max, *parent_saddle;
   double *flux;
   int64_t *pixpos;
   int64_t *peakidx;
   int64_t subx, suby, subw, subh, nmap, idx, count;
   int64_t i, j, l, write;
-  int *label, *keep, *label_to_obj, *keep_labels;
+  int *label, *keep, *label_to_obj, *keep_labels, *saddle_parent, *merge_target;
   int64_t *npix;
   int64_t *obj_counts;
   int *obj_labels;
@@ -403,11 +403,14 @@ static int deblend_watershed(
     peakidx = NULL;
     peakx = peaky = peakval = NULL;
     saddle_max = NULL;
+    parent_saddle = NULL;
     flux = NULL;
     npix = NULL;
     keep = NULL;
     label_to_obj = NULL;
     keep_labels = NULL;
+    saddle_parent = NULL;
+    merge_target = NULL;
     obj_counts = NULL;
     obj_labels = NULL;
     peak_order = NULL;
@@ -662,8 +665,17 @@ static int deblend_watershed(
         status = MEMORY_ALLOC_ERROR;
         goto obj_cleanup;
       }
+      if (!(parent_saddle = (float *)malloc((size_t)(nlabels + 1) * sizeof(float)))) {
+        status = MEMORY_ALLOC_ERROR;
+        goto obj_cleanup;
+      }
+      if (!(saddle_parent = (int *)calloc((size_t)(nlabels + 1), sizeof(int)))) {
+        status = MEMORY_ALLOC_ERROR;
+        goto obj_cleanup;
+      }
       for (i = 0; i <= nlabels; i++) {
         saddle_max[i] = -BIG;
+        parent_saddle[i] = -BIG;
       }
       for (i = 0; i < count; i++) {
         int64_t xx, yy;
@@ -699,6 +711,20 @@ static int deblend_watershed(
             if (saddle > saddle_max[nlab]) {
               saddle_max[nlab] = saddle;
             }
+            if ((peakval[nlab] > peakval[j]
+                 || (peakval[nlab] == peakval[j] && nlab < j))
+                && saddle > parent_saddle[j])
+            {
+              parent_saddle[j] = saddle;
+              saddle_parent[j] = nlab;
+            }
+            if ((peakval[j] > peakval[nlab]
+                 || (peakval[j] == peakval[nlab] && j < nlab))
+                && saddle > parent_saddle[nlab])
+            {
+              parent_saddle[nlab] = saddle;
+              saddle_parent[nlab] = (int)j;
+            }
           }
         }
       }
@@ -727,6 +753,22 @@ static int deblend_watershed(
       for (i = 1; i <= nlabels; i++) {
         nkeep += keep[i];
       }
+      if (!(merge_target = (int *)calloc((size_t)(nlabels + 1), sizeof(int)))) {
+        status = MEMORY_ALLOC_ERROR;
+        goto obj_cleanup;
+      }
+      for (i = 1; i <= nlabels; i++) {
+        int target = (int)i;
+        if (keep[i]) {
+          continue;
+        }
+        while (saddle_parent[target] && !keep[saddle_parent[target]]) {
+          target = saddle_parent[target];
+        }
+        if (saddle_parent[target] && keep[saddle_parent[target]]) {
+          merge_target[i] = saddle_parent[target];
+        }
+      }
     }
 
     if (nkeep <= 1) {
@@ -749,6 +791,10 @@ static int deblend_watershed(
       idx = pixpos[i];
       j = label[idx];
       if (j <= 0 || keep[j]) {
+        continue;
+      }
+      if (merge_target && merge_target[j]) {
+        label[idx] = merge_target[j];
         continue;
       }
       best_d2 = 1.0e30;
@@ -859,11 +905,14 @@ static int deblend_watershed(
     free(peaky);
     free(peakval);
     free(saddle_max);
+    free(parent_saddle);
     free(flux);
     free(npix);
     free(keep);
     free(label_to_obj);
     free(keep_labels);
+    free(saddle_parent);
+    free(merge_target);
     free(obj_counts);
     free(obj_labels);
     free(peak_order);

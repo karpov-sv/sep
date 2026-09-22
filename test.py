@@ -740,6 +740,33 @@ def test_extract_watershed_prominence_pairwise_validation_grid():
     assert min(unequal_scores) > 0.8
 
 
+def test_extract_watershed_prominence_merges_into_saddle_parent():
+    """A rejected basin follows its strongest higher-peak saddle, not proximity."""
+    ygrid, xgrid = np.indices((81, 81))
+    image = (
+        30.0 * np.exp(-((xgrid - 30.0) ** 2 + (ygrid - 40.0) ** 2) / (2.0 * 5.0**2))
+        + 10.0 * np.exp(-((xgrid - 39.0) ** 2 + (ygrid - 40.0) ** 2) / 2.0)
+        + 20.0 * np.exp(-((xgrid - 44.0) ** 2 + (ygrid - 40.0) ** 2) / 2.0)
+    ).astype(np.float32)
+
+    objects, segmap = sep.extract(
+        image,
+        0.1,
+        minarea=1,
+        filter_kernel=None,
+        clean=False,
+        deblend_cont=0.0,
+        deblend_method="watershed",
+        deblend_saddle=4.0,
+        segmentation_map=True,
+    )
+
+    assert len(objects) == 2
+    merged_label = segmap[40, 39]
+    assert merged_label > 0
+    assert objects[merged_label - 1]["x"] < 35.0
+
+
 @pytest.mark.parametrize("fwhm", [1.0, 1.2, 1.4, 1.6])
 def test_extract_fwhm_compact_gaussian(fwhm):
     flux = np.array([5000.0])
