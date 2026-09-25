@@ -381,6 +381,7 @@ int sep_psf_create(sep_psf **out, const float *data, int w, int h, int ncomp,
   psf->sx = sx;
   psf->sy = sy;
   psf->pixstep = pixstep;
+  psf->sampled = 0;
   psf->fwhm = fwhm;
   psf->fit_radius = 0.0; /* 0 = use full stamp */
   psf->damp_snthresh = 0.0;   /* 0 = no position damping */
@@ -577,8 +578,10 @@ int sep_psf_resample(sep_psf *psf, double dx, double dy) {
   if (ny2 <= 0) return RETURN_OK;
 
   /* For supersampled PSFs, use conservative area-overlap remapping.
-   * This preserves flux across sampling changes and reduces phase bias. */
-  if (psf->pixstep < 1.0f) {
+   * This preserves flux across sampling changes and reduces phase bias.
+   * Point-sampled models of the pixel-integrated PSF (psf->sampled) are
+   * already integrated over image pixels, and are interpolated instead. */
+  if (psf->pixstep < 1.0f && !psf->sampled) {
     float xlo, xhi, ylo, yhi, left, right, ov;
 
     /* Compute x overlap kernels */
@@ -803,6 +806,13 @@ int sep_psf_resample(sep_psf *psf, double dx, double dy) {
       maskt += n;
       *pixout = val;
     }
+  }
+
+  /* Point samples are normalized per PSF pixel area; rescale to image
+   * pixel area so that the resampled stamp conserves flux */
+  if (psf->sampled && step2 != 1.0f) {
+    float scale = step2 * step2;
+    for (k = 0; k < w2 * h2; k++) pix2[k] *= scale;
   }
 
   return RETURN_OK;

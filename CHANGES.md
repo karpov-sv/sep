@@ -8,6 +8,10 @@ Unreleased
 * Add sigma-clipped annulus background controls (`clip_sigma`, `clip_iters`)
   to `sum_circle`, `sum_ellipse`, and `sum_circle_optimal`, with a fast
   legacy fallback when `clip_iters=0`.
+* Add `sampled` option to `PSF` for supersampled models that are point samples
+  of the pixel-integrated PSF (PSFEx convention); they are resampled by
+  interpolation instead of area overlap, which broadened them and biased PSF
+  fluxes by several percent. `PSF.from_psfex` sets it.
 
 v1.3.7 (8 November 2024)
 ========================

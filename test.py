@@ -2836,6 +2836,46 @@ def test_psf_fit_exact_center():
     assert flag == 0
 
 
+def _pixel_integrated_gaussian(u, sigma):
+    """Integral of unit 1-D Gaussian over pixels centered at u."""
+    s = math.sqrt(2.0) * sigma
+    erf = np.vectorize(math.erf)
+    return 0.5 * (erf((u + 0.5) / s) - erf((u - 0.5) / s))
+
+
+def test_psf_fit_sampled_model():
+    """Point-sampled pixel-integrated PSF models (PSFEx convention) are
+    interpolated, not integrated once more over image pixels."""
+    fwhm = 2.6
+    sigma = fwhm / 2.354820045
+    oversampling = 2
+    size = 31  # supersampled, odd, center at size // 2
+    g = (np.arange(size) - size // 2) / oversampling
+    stamp = np.outer(_pixel_integrated_gaussian(g, sigma),
+                     _pixel_integrated_gaussian(g, sigma))
+    stamp /= stamp.sum()
+
+    psf_sampled = sep.PSF(stamp, sampling=1.0 / oversampling, fwhm=fwhm, sampled=True)
+    psf_density = sep.PSF(stamp, sampling=1.0 / oversampling, fwhm=fwhm)
+    assert psf_sampled.sampled
+    assert not psf_density.sampled
+
+    u = np.arange(64)
+    fluxes_sampled, fluxes_density = [], []
+    for phase in [0.0, 0.25, 0.5, 0.75]:
+        x0 = y0 = 32.0 + phase
+        data = 1000.0 * np.outer(_pixel_integrated_gaussian(u - y0, sigma),
+                                 _pixel_integrated_gaussian(u - x0, sigma))
+        for psf, fluxes in [(psf_sampled, fluxes_sampled), (psf_density, fluxes_density)]:
+            flux, _, _, _, flag, _, _ = sep.psf_fit(data, x0, y0, psf)
+            assert flag == 0
+            fluxes.append(flux)
+
+    assert_allclose(fluxes_sampled, 1000.0, rtol=0.003)
+    # Integrating the samples over image pixels again broadens the model
+    assert np.all(np.array(fluxes_density) > 1020.0)
+
+
 def test_psf_fit_returns_chi2_and_niter():
     """psf_fit always exposes chi2 and niter."""
     fwhm = 3.5

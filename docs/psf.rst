@@ -48,10 +48,14 @@ The native fitting stamp size is derived from continuous scaling:
    w_\mathrm{native} = \mathrm{round}(w_\mathrm{psf} \cdot sampling),\;\;
    h_\mathrm{native} = \mathrm{round}(h_\mathrm{psf} \cdot sampling)
 
-For supersampled models (``sampling < 1``), SEP uses a conservative
-area-overlap remap (separable x/y passes) to downsample to native pixels.
-For ``sampling >= 1``, SEP uses Lanczos interpolation. In both cases, the
-resampled stamp is normalized before flux estimation/fitting.
+For supersampled models (``sampling < 1``), the default assumes each PSF
+pixel holds a density and uses a conservative area-overlap remap to integrate
+it over native image pixels. Set ``sampled=True`` when the PSF grid instead
+contains point samples of an already pixel-integrated profile; SEP then uses
+Lanczos interpolation. PSFEx models use this convention, so
+``PSF.from_psfex`` sets ``sampled=True`` automatically. Models with
+``sampling >= 1`` also use Lanczos interpolation. The resampled stamp is
+normalized before flux estimation/fitting.
 
 Running PSF photometry
 ----------------------

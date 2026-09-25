@@ -124,6 +124,10 @@ typedef struct {
   double x0, y0; /* context normalization offsets */
   double sx, sy; /* context normalization scales */
   float pixstep; /* PSF sampling step (image_pix / psf_pix) */
+  int sampled; /* 0: supersampled pixels hold PSF density, resampled by
+                * area overlap (default); 1: they are point samples of the
+                * pixel-integrated PSF (PSFEx convention), resampled by
+                * interpolation */
   double fwhm; /* typical PSF FWHM in image pixels */
   float * data; /* component images: ncomp * h * w (owned) */
   float * loc; /* workspace: local supersampled PSF, h * w */

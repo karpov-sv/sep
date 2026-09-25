@@ -305,6 +305,7 @@ cdef extern from "sep.h":
         double x0, y0
         double sx, sy
         float pixstep
+        int sampled
         double fwhm
         float *data
         float *loc
@@ -3122,7 +3123,7 @@ def get_sub_object_limit():
 # PSF photometry
 
 cdef class PSF:
-    """PSF(data, sampling=1.0, degree=0, x0=0.0, y0=0.0, sx=1.0, sy=1.0, fwhm=0.0)
+    """PSF(data, sampling=1.0, degree=0, x0=0.0, y0=0.0, sx=1.0, sy=1.0, fwhm=0.0, sampled=False)
 
     Represents a spatially varying PSF model as a polynomial expansion
     over supersampled component images (e.g., from PSFEx).
@@ -3143,6 +3144,12 @@ cdef class PSF:
         Context normalization scales.
     fwhm : float, optional
         Typical PSF FWHM in image pixels.
+    sampled : bool, optional
+        How supersampled (``sampling < 1``) data are resampled to image
+        pixels. If False (default), data pixels hold the PSF density and are
+        integrated over image pixels by area overlap. If True, they are point
+        samples of the PSF already integrated over image pixels (PSFEx
+        convention), and are interpolated.
     """
 
     cdef sep_psf *ptr
@@ -3153,7 +3160,7 @@ cdef class PSF:
                   double sampling=1.0, int degree=0,
                   double x0=0.0, double y0=0.0,
                   double sx=1.0, double sy=1.0,
-                  double fwhm=0.0):
+                  double fwhm=0.0, bint sampled=False):
         cdef int status
         cdef np.ndarray[float, ndim=3, mode='c'] darr
 
@@ -3170,12 +3177,13 @@ cdef class PSF:
                                 degree, x0, y0, sx, sy,
                                 <float>sampling, fwhm)
         _assert_ok(status)
+        self.ptr.sampled = 1 if sampled else 0
 
     def __init__(self, np.ndarray data not None,
                  double sampling=1.0, int degree=0,
                  double x0=0.0, double y0=0.0,
                  double sx=1.0, double sy=1.0,
-                 double fwhm=0.0):
+                 double fwhm=0.0, bint sampled=False):
         pass
 
     def __dealloc__(self):
@@ -3211,6 +3219,11 @@ cdef class PSF:
         """Typical PSF FWHM in image pixels."""
         def __get__(self):
             return self.ptr.fwhm
+
+    property sampled:
+        """Whether data are point samples of the pixel-integrated PSF."""
+        def __get__(self):
+            return bool(self.ptr.sampled)
 
     property stamp_width:
         """Native-resolution stamp width."""
@@ -3297,9 +3310,10 @@ cdef class PSF:
         sampling = header.get('PSF_SAMP', 1.0)
         fwhm = header.get('PSF_FWHM', 0.0)
 
+        # PSFEx models are point samples of the pixel-integrated PSF
         return cls(np.ascontiguousarray(data, dtype=np.float32),
                    sampling=sampling, degree=degree,
-                   x0=x0, y0=y0, sx=sx, sy=sy, fwhm=fwhm)
+                   x0=x0, y0=y0, sx=sx, sy=sy, fwhm=fwhm, sampled=True)
 
 
 @cython.boundscheck(False)
