@@ -14,10 +14,11 @@ Unreleased
   of the pixel-integrated PSF (PSFEx convention); they are resampled by
   interpolation instead of area overlap, which broadened them and biased PSF
   fluxes by several percent. `PSF.from_psfex` sets it.
-* C API compatibility: add `deblend_saddle` to `sep_extract` and
-  `sep_extract_with_pixels`, and add `sampled` to the public `sep_psf`
-  structure. C callers must update extraction calls (pass `0.0` for the
-  previous behavior) and rebuild against the new header and library.
+* Add C entry points `sep_extract_ex` and `sep_extract_with_pixels_ex` for
+  `deblend_saddle` control. Preserve the original extraction signatures and
+  behavior, with prominence merging disabled for existing C callers.
+* Add `sampled` to the public `sep_psf` structure; C clients using PSF models
+  should verify structure layout compatibility on their target platform.
 
 v1.5.1 (18 July 2026)
 ====================

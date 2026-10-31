@@ -145,7 +145,7 @@ cdef extern from "sep.h":
     int sep_bkg_subarray(const sep_bkg *bkg, void *arr, int dtype)
     void sep_bkg_free(sep_bkg *bkg)
 
-    int sep_extract(const sep_image *image,
+    int sep_extract_ex(const sep_image *image,
                     float thresh,
                     int thresh_type,
                     int minarea,
@@ -160,7 +160,7 @@ cdef extern from "sep.h":
                     int clean_flag,
                     double clean_param,
                     sep_catalog **catalog)
-    int sep_extract_with_pixels(const sep_image *image,
+    int sep_extract_with_pixels_ex(const sep_image *image,
                                 float thresh,
                                 int thresh_type,
                                 int minarea,
@@ -983,7 +983,7 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
         thresh_type = SEP_THRESH_REL
 
     include_pixels = 1 if (type(segmentation_map) is np.ndarray or segmentation_map) else 0
-    status = sep_extract_with_pixels(&im,
+    status = sep_extract_with_pixels_ex(&im,
                                      thresh, thresh_type, minarea,
                                      kernelptr, kernelw, kernelh, filter_typecode,
                                      deblend_nthresh, deblend_cont, deblend_fwhm,

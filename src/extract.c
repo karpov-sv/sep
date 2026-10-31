@@ -376,12 +376,61 @@ int sep_extract(
     double deblend_cont,
     double deblend_fwhm,
     int deblend_method,
+    int clean_flag,
+    double clean_param,
+    sep_catalog ** catalog
+) {
+  return sep_extract_ex(
+      image, thresh, thresh_type, minarea, conv, convw, convh, filter_type,
+      deblend_nthresh, deblend_cont, deblend_fwhm, deblend_method, 0.0,
+      clean_flag, clean_param, catalog
+  );
+}
+
+int sep_extract_with_pixels(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
+    int clean_flag,
+    double clean_param,
+    int include_pixels,
+    sep_catalog ** catalog
+) {
+  return sep_extract_with_pixels_ex(
+      image, thresh, thresh_type, minarea, conv, convw, convh, filter_type,
+      deblend_nthresh, deblend_cont, deblend_fwhm, deblend_method, 0.0,
+      clean_flag, clean_param, include_pixels, catalog
+  );
+}
+
+int sep_extract_ex(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
     double deblend_saddle,
     int clean_flag,
     double clean_param,
     sep_catalog ** catalog
 ) {
-  return sep_extract_with_pixels(
+  return sep_extract_with_pixels_ex(
       image,
       thresh,
       thresh_type,
@@ -402,7 +451,7 @@ int sep_extract(
   );
 }
 
-int sep_extract_with_pixels(
+int sep_extract_with_pixels_ex(
     const sep_image * image,
     float thresh,
     int thresh_type,

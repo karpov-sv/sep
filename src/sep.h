@@ -309,7 +309,6 @@ SEP_API int sep_extract(
     double deblend_cont, /* min. deblending contrast    [0.005] */
     double deblend_fwhm, /* deblend PSF FWHM (pixels)      [0.0] */
     int deblend_method, /* deblending method              [0] */
-    double deblend_saddle, /* watershed min. peak-saddle prominence [0.0] */
     int clean_flag, /* perform cleaning?               [1] */
     double clean_param, /* clean parameter               [1.0] */
     sep_catalog ** catalog
@@ -321,6 +320,49 @@ SEP_API int sep_extract(
  * catalog->objectspix when per-object pixel indices are not needed.
  */
 SEP_API int sep_extract_with_pixels(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
+    int clean_flag,
+    double clean_param,
+    int include_pixels,
+    sep_catalog ** catalog
+);
+
+/* Extended extraction entry points. Like the corresponding functions above,
+ * with watershed minimum peak-to-saddle prominence in detection-statistic
+ * units. A deblend_saddle of 0.0 disables prominence merging and reproduces
+ * the behavior of the original entry points, whose signatures are unchanged.
+ */
+SEP_API int sep_extract_ex(
+    const sep_image * image,
+    float thresh,
+    int thresh_type,
+    int minarea,
+    const float * conv,
+    int64_t convw,
+    int64_t convh,
+    int filter_type,
+    int deblend_nthresh,
+    double deblend_cont,
+    double deblend_fwhm,
+    int deblend_method,
+    double deblend_saddle,
+    int clean_flag,
+    double clean_param,
+    sep_catalog ** catalog
+);
+
+SEP_API int sep_extract_with_pixels_ex(
     const sep_image * image,
     float thresh,
     int thresh_type,

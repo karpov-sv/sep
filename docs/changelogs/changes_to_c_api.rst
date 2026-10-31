@@ -16,20 +16,24 @@ All changes here are transparent to users of the Python interface.
 Unreleased compatibility changes (since v1.5.1)
 ----------------------------------------------
 
-``sep_extract`` and ``sep_extract_with_pixels`` take a new
-``double deblend_saddle`` argument immediately after ``deblend_method``.
-Pass ``0.0`` to retain the previous behavior.
+``sep_extract`` and ``sep_extract_with_pixels`` retain their v1.5.1 signatures
+and behavior, with watershed prominence merging disabled. Existing extraction
+callers do not need to change or rebuild.
+
+New entry points ``sep_extract_ex`` and ``sep_extract_with_pixels_ex`` take
+an additional ``double deblend_saddle`` argument immediately after
+``deblend_method``. Pass ``0.0`` to reproduce the corresponding original
+entry point, or a positive value to enable prominence merging. The Python
+interface uses ``sep_extract_with_pixels_ex``.
 
 The public ``sep_psf`` structure has a new ``int sampled`` member.
 ``sep_psf_create`` initializes it to zero (density samples integrated by
 area overlap); set it to one for point samples of a pixel-integrated PSF,
 such as a PSFEx model, which require interpolation instead.
 
-The changed extraction signatures break C source/binary compatibility
-with v1.5.1. Update extraction calls and rebuild C clients against the
-matching header and library. The new ``sampled`` member occupies existing
-padding on some platforms; do not assume this preserves the structure's
-layout on every supported platform.
+The new ``sampled`` member occupies existing padding on some platforms;
+C clients using PSF models should verify structure layout compatibility
+on their target platform and rebuild if necessary.
 
 Cumulative API changes
 ----------------------
@@ -92,9 +96,14 @@ Cumulative API changes
    ``int64_t``.
  - Added ``deblend_fwhm`` parameter to enable fixed-PSF deblending.
  - Added ``deblend_method`` parameter to select deblending algorithm.
- - Added ``deblend_saddle`` parameter to merge low-prominence watershed
-   basins using the peak-to-saddle depth in detection-statistic units.
  - Added ``fwhm`` output field to ``sep_catalog``.
+
+.. c:function:: int sep_extract_ex()
+.. c:function:: int sep_extract_with_pixels_ex()
+
+ - Added extended extraction entry points with a ``deblend_saddle`` parameter
+   to merge low-prominence watershed basins using the peak-to-saddle depth
+   in detection-statistic units. The original entry points disable merging.
 
 .. c:function:: int sep_sum_circann_multi()
 
