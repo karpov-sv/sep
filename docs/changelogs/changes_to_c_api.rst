@@ -13,8 +13,8 @@ image.
 
 All changes here are transparent to users of the Python interface.
 
-Unreleased compatibility changes (since v1.5.1)
-----------------------------------------------
+v1.5.2 compatibility changes
+----------------------------
 
 ``sep_extract`` and ``sep_extract_with_pixels`` retain their v1.5.1 signatures
 and behavior, with watershed prominence merging disabled. Existing extraction

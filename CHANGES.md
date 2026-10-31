@@ -1,6 +1,9 @@
 Unreleased
 ==========
 
+v1.5.2 (31 October 2026)
+=======================
+
 * Add `deblend_saddle` to `extract` for rejecting low-prominence watershed
   basins by their peak-to-saddle depth in detection-statistic units (S/N
   units with matched filtering and an error input). The default, zero,
