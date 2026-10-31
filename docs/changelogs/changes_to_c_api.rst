@@ -13,6 +13,27 @@ image.
 
 All changes here are transparent to users of the Python interface.
 
+Unreleased compatibility changes (since v1.5.1)
+----------------------------------------------
+
+``sep_extract`` and ``sep_extract_with_pixels`` take a new
+``double deblend_saddle`` argument immediately after ``deblend_method``.
+Pass ``0.0`` to retain the previous behavior.
+
+The public ``sep_psf`` structure has a new ``int sampled`` member.
+``sep_psf_create`` initializes it to zero (density samples integrated by
+area overlap); set it to one for point samples of a pixel-integrated PSF,
+such as a PSFEx model, which require interpolation instead.
+
+The changed extraction signatures break C source/binary compatibility
+with v1.5.1. Update extraction calls and rebuild C clients against the
+matching header and library. The new ``sampled`` member occupies existing
+padding on some platforms; do not assume this preserves the structure's
+layout on every supported platform.
+
+Cumulative API changes
+----------------------
+
 .. c:struct::  sep_image
 
  - Three new parameters have been added:

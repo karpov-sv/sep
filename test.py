@@ -740,6 +740,52 @@ def test_extract_watershed_prominence_pairwise_validation_grid():
     assert min(unequal_scores) > 0.8
 
 
+@pytest.mark.parametrize(
+    "profile, merged_peaks, separate_peak",
+    [
+        ([1, 10, 8.5, 9, 1, 1, 5, 1], [2, 4], 7),
+        ([1, 10, 8.5, 10, 1, 1, 5, 1], [2, 4], 7),
+        ([1, 7, 5.5, 6, 1, 1, 10, 1], [2, 4], 7),
+        ([1, 10, 8.5, 9, 7.5, 8, 1, 1, 5, 1], [2, 4, 6], 9),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_extract_watershed_prominence_preserves_higher_peak(
+    profile, merged_peaks, separate_peak, reverse
+):
+    """Shallow saddles remove weaker peaks while preserving their parent."""
+    image = np.zeros((3, len(profile) + 2), dtype=np.float32)
+    image[1, 1:-1] = profile
+    if reverse:
+        image = np.ascontiguousarray(image[:, ::-1])
+        merged_peaks = [image.shape[1] - 1 - x for x in merged_peaks]
+        separate_peak = image.shape[1] - 1 - separate_peak
+
+    def extract(prominence):
+        return sep.extract(
+            image,
+            0.5,
+            minarea=1,
+            filter_kernel=None,
+            clean=False,
+            deblend_cont=0.0,
+            deblend_method="watershed",
+            deblend_saddle=prominence,
+            segmentation_map=True,
+        )
+
+    unmerged, _ = extract(0.0)
+    assert len(unmerged) == len(merged_peaks) + 1
+    objects, segmap = extract(2.0)
+    assert len(objects) == 2
+    merged_label = segmap[1, merged_peaks[0]]
+    assert merged_label > 0
+    assert np.all(segmap[1, merged_peaks] == merged_label)
+    assert segmap[1, separate_peak] > 0
+    assert segmap[1, separate_peak] != merged_label
+    assert np.all(segmap[1, 1:-1] > 0)
+
+
 def test_extract_watershed_prominence_merges_into_saddle_parent():
     """A rejected basin follows its strongest higher-peak saddle, not proximity."""
     ygrid, xgrid = np.indices((81, 81))

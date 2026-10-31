@@ -362,7 +362,7 @@ static int deblend_watershed(
   pliststruct * pixel, *pixt, *pixt2;
   objliststruct seglist;
   double total_flux, best_d2, dx, dy;
-  float *valmap, *peakx, *peaky, *peakval, *saddle_max, *parent_saddle;
+  float *valmap, *peakx, *peaky, *peakval, *parent_saddle;
   double *flux;
   int64_t *pixpos;
   int64_t *peakidx;
@@ -402,7 +402,6 @@ static int deblend_watershed(
     pixpos = NULL;
     peakidx = NULL;
     peakx = peaky = peakval = NULL;
-    saddle_max = NULL;
     parent_saddle = NULL;
     flux = NULL;
     npix = NULL;
@@ -657,14 +656,11 @@ static int deblend_watershed(
       }
     }
 
-    /* For every watershed basin, find the highest level at which it
-     * touches another basin.  The difference from its peak is its
-     * topographic prominence in the detection-statistic image. */
+    /* For every watershed basin, find the highest saddle to a basin with
+     * a higher peak (breaking equal-peak ties by label). Only this saddle
+     * can reject the basin: a shallow saddle to a lower peak must not
+     * remove the higher peak as well. */
     if (deblend_saddle > 0.0 && isfinite(deblend_saddle)) {
-      if (!(saddle_max = (float *)malloc((size_t)(nlabels + 1) * sizeof(float)))) {
-        status = MEMORY_ALLOC_ERROR;
-        goto obj_cleanup;
-      }
       if (!(parent_saddle = (float *)malloc((size_t)(nlabels + 1) * sizeof(float)))) {
         status = MEMORY_ALLOC_ERROR;
         goto obj_cleanup;
@@ -674,7 +670,6 @@ static int deblend_watershed(
         goto obj_cleanup;
       }
       for (i = 0; i <= nlabels; i++) {
-        saddle_max[i] = -BIG;
         parent_saddle[i] = -BIG;
       }
       for (i = 0; i < count; i++) {
@@ -705,12 +700,6 @@ static int deblend_watershed(
               continue;
             }
             saddle = valmap[idx] < valmap[nidx] ? valmap[idx] : valmap[nidx];
-            if (saddle > saddle_max[j]) {
-              saddle_max[j] = saddle;
-            }
-            if (saddle > saddle_max[nlab]) {
-              saddle_max[nlab] = saddle;
-            }
             if ((peakval[nlab] > peakval[j]
                  || (peakval[nlab] == peakval[j] && nlab < j))
                 && saddle > parent_saddle[j])
@@ -743,9 +732,11 @@ static int deblend_watershed(
       }
     }
 
-    if (saddle_max) {
+    if (parent_saddle) {
       for (i = 1; i <= nlabels; i++) {
-        if (keep[i] && peakval[i] - saddle_max[i] < deblend_saddle) {
+        if (keep[i] && saddle_parent[i]
+            && peakval[i] - parent_saddle[i] < deblend_saddle)
+        {
           keep[i] = 0;
         }
       }
@@ -904,7 +895,6 @@ static int deblend_watershed(
     free(peakx);
     free(peaky);
     free(peakval);
-    free(saddle_max);
     free(parent_saddle);
     free(flux);
     free(npix);

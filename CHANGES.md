@@ -1,6 +1,34 @@
 Unreleased
 ==========
 
+* Add `deblend_saddle` to `extract` for rejecting low-prominence watershed
+  basins by their peak-to-saddle depth in detection-statistic units (S/N
+  units with matched filtering and an error input). The default, zero,
+  disables prominence merging.
+* Merge rejected watershed basins along higher-peak saddle-parent chains
+  where possible, rather than assigning their pixels solely by proximity.
+* Preserve higher watershed peaks when rejecting shallow saddles to weaker
+  neighbors; previously both peaks could be rejected, merging distinct
+  sources elsewhere in the same footprint.
+* Add `sampled` option to `PSF` for supersampled models that are point samples
+  of the pixel-integrated PSF (PSFEx convention); they are resampled by
+  interpolation instead of area overlap, which broadened them and biased PSF
+  fluxes by several percent. `PSF.from_psfex` sets it.
+* C API compatibility: add `deblend_saddle` to `sep_extract` and
+  `sep_extract_with_pixels`, and add `sampled` to the public `sep_psf`
+  structure. C callers must update extraction calls (pass `0.0` for the
+  previous behavior) and rebuild against the new header and library.
+
+v1.5.1 (18 July 2026)
+====================
+
+* Rename the Python extension to `sep_x` so SEP-X can be installed alongside
+  upstream SEP. Use `import sep_x as sep` when migrating existing code.
+* Fix local annulus background subtraction in optimal-extraction photometry.
+
+v1.5.0 (11 July 2026)
+====================
+
 * Add optimal-extraction circular photometry (`sum_circle_optimal`) with
   auto-grouping for overlapping apertures and configurable grouping radius.
 * Add sigma-clipped annulus statistics (`stats_circann`, `stats_ellipann`)
@@ -8,10 +36,15 @@ Unreleased
 * Add sigma-clipped annulus background controls (`clip_sigma`, `clip_iters`)
   to `sum_circle`, `sum_ellipse`, and `sum_circle_optimal`, with a fast
   legacy fallback when `clip_iters=0`.
-* Add `sampled` option to `PSF` for supersampled models that are point samples
-  of the pixel-integrated PSF (PSFEx convention); they are resampled by
-  interpolation instead of area overlap, which broadened them and biased PSF
-  fluxes by several percent. `PSF.from_psfex` sets it.
+* Add PSF models, PSFEx loading, source rendering, PSF photometry, grouped
+  fitting, PSF-matched peak detection, and optional OpenMP acceleration.
+* Add optional watershed and fixed-PSF deblending, source FWHM estimates,
+  and improvements to faint-source detection and extraction performance.
+* Add PSF-weighted windowed centroiding and controls to constrain centroid
+  motion and use segmentation maps.
+* Improve masking, grouped photometry, and PSF fitting stability and speed.
+* Document the SEP-X fork, organize scientific regression benchmarks, and
+  fix release builds and wheel configuration.
 
 v1.3.7 (8 November 2024)
 ========================
