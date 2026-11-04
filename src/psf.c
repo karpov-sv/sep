@@ -1793,84 +1793,180 @@ int sep_psf_snr(const sep_image *im, sep_psf *psf, int local_bkg,
     return status;
   }
 
-  for (iy0 = 0; iy0 < im->h; iy0++) {
-    for (ix0 = 0; ix0 < im->w; ix0++) {
-      double psfsum = 0.0;
-      double num = 0.0, den = 0.0;
-      double sumw = 0.0, sumpw = 0.0, sumdw = 0.0;
-      double varpix = 1.0;
+  /* Spatially varying PSF.
+   *
+   * The local PSF is P(x,y) = resample(sum_i t_i(x,y) C_i), with t_i the
+   * polynomial terms and C_i the supersampled components. Both the polynomial
+   * expansion and the resampling (area overlap, interpolation or copy at zero
+   * shift) are linear, so resample(sum_i t_i C_i) = sum_i t_i resample(C_i).
+   * Each component is therefore resampled once, and the native-resolution
+   * stamp at every output pixel is a cheap linear combination of the
+   * resampled components. The per-pixel weights 1/V and D/V are also
+   * precomputed once, so the inner loop has no type conversions. */
+  {
+    const int npix_s = psf->w * psf->h;
+    const int rw = psf->rw, rh = psf->rh, rnpix = psf->rw * psf->rh;
+    size_t npix_img = (size_t)im->w * (size_t)im->h;
+    double scalar_var = 1.0;
+    double *rcomp = NULL, *rsum = NULL, *stamp = NULL, *terms = NULL;
+    double *dxp = NULL, *dyp = NULL, *wdata = NULL, *winv = NULL;
+    int nterms, i, i1, i2, p;
 
-      opos = (int64_t)iy0 * im->w + ix0;
-      out[opos] = 0.0;
+    /* Number of components that sep_psf_build() actually uses */
+    nterms = 0;
+    for (i2 = 0; i2 <= psf->degree; i2++)
+      for (i1 = 0; i1 <= psf->degree - i2; i1++)
+        if (nterms < psf->ncomp) nterms++;
 
-      status = sep_psf_build(psf, (double)ix0, (double)iy0);
-      if (status != RETURN_OK) return status;
+    if (im->noise_type != SEP_NOISE_NONE && !errisarray) {
+      scalar_var = errisstd ? im->noiseval * im->noiseval : im->noiseval;
+    }
+
+    rcomp = (double *)malloc((size_t)nterms * rnpix * sizeof(double));
+    rsum = (double *)calloc((size_t)nterms, sizeof(double));
+    stamp = (double *)malloc((size_t)rnpix * sizeof(double));
+    terms = (double *)malloc((size_t)nterms * sizeof(double));
+    dxp = (double *)malloc((size_t)(psf->degree + 1) * sizeof(double));
+    dyp = (double *)malloc((size_t)(psf->degree + 1) * sizeof(double));
+    wdata = (double *)calloc(npix_img, sizeof(double));
+    winv = (double *)calloc(npix_img, sizeof(double));
+    if (!rcomp || !rsum || !stamp || !terms || !dxp || !dyp || !wdata || !winv) {
+      status = MEMORY_ALLOC_ERROR;
+      goto varying_exit;
+    }
+
+    /* Resample every component once (psf->loc is scratch workspace) */
+    for (i = 0; i < nterms; i++) {
+      memcpy(psf->loc, psf->data + (size_t)i * npix_s,
+             (size_t)npix_s * sizeof(float));
       status = sep_psf_resample(psf, 0.0, 0.0);
-      if (status != RETURN_OK) return status;
+      if (status != RETURN_OK) goto varying_exit;
+      for (p = 0; p < rnpix; p++) {
+        rcomp[(size_t)i * rnpix + p] = psf->resi[p];
+        rsum[i] += psf->resi[p];
+      }
+    }
 
-      for (sx = 0; sx < psf->rw * psf->rh; sx++) psfsum += psf->resi[sx];
-      if (psfsum <= 0.0) continue;
+    /* Per-pixel weights; excluded pixels keep zero weight */
+    for (pos = 0; pos < (int64_t)npix_img; pos++) {
+      double pix, varpix, total_var;
 
-      for (sy = 0; sy < psf->rh; sy++) {
-        imy = iy0 - psf->rh / 2 + sy;
-        if (imy < 0 || imy >= im->h) continue;
+      if (im->mask) {
+        maskt = (const char *)im->mask + pos * msize;
+        if (mconvert(maskt) > im->maskthresh) continue;
+      }
 
-        for (sx = 0; sx < psf->rw; sx++) {
-          double psfw, pix, total_var;
+      datat = (const char *)im->data + pos * size;
+      pix = convert(datat);
 
-          imx = ix0 - psf->rw / 2 + sx;
-          if (imx < 0 || imx >= im->w) continue;
+      if (errisarray) {
+        errort = (const char *)im->noise + pos * esize;
+        varpix = econvert(errort);
+        if (errisstd) varpix *= varpix;
+      } else {
+        varpix = scalar_var;
+      }
+      if (varpix <= 0.0) continue;
 
-          psfw = psf->resi[sy * psf->rw + sx] / psfsum;
-          if (psfw == 0.0) continue;
+      total_var = varpix;
+      if (im->gain > 0.0 && pix > 0.0) total_var += pix / im->gain;
 
-          pos = imy * im->w + imx;
+      winv[pos] = 1.0 / total_var;
+      wdata[pos] = pix * winv[pos];
+    }
 
-          if (im->mask) {
-            maskt = (const char *)im->mask + pos * msize;
-            if (mconvert(maskt) > im->maskthresh) continue;
+    for (iy0 = 0; iy0 < im->h; iy0++) {
+      double dy = (psf->sy != 0.0) ? ((double)iy0 - psf->y0) / psf->sy : 0.0;
+
+      dyp[0] = 1.0;
+      for (i = 1; i <= psf->degree; i++) dyp[i] = dyp[i - 1] * dy;
+
+      for (ix0 = 0; ix0 < im->w; ix0++) {
+        double dx = (psf->sx != 0.0) ? ((double)ix0 - psf->x0) / psf->sx : 0.0;
+        double psfsum = 0.0;
+        double num = 0.0, den = 0.0;
+        double sumw = 0.0, sumpw = 0.0, sumdw = 0.0;
+        int sy0, sy1, sx0, sx1;
+
+        opos = (int64_t)iy0 * im->w + ix0;
+        out[opos] = 0.0;
+
+        /* Polynomial terms, in the same order as sep_psf_build() */
+        dxp[0] = 1.0;
+        for (i = 1; i <= psf->degree; i++) dxp[i] = dxp[i - 1] * dx;
+        i = 0;
+        for (i2 = 0; i2 <= psf->degree; i2++) {
+          for (i1 = 0; i1 <= psf->degree - i2; i1++) {
+            if (i >= nterms) break;
+            terms[i] = dxp[i1] * dyp[i2];
+            psfsum += terms[i] * rsum[i];
+            i++;
           }
+        }
+        if (psfsum <= 0.0) continue;
 
-          datat = (const char *)im->data + pos * size;
-          pix = convert(datat);
+        /* Unit-sum local stamp, restricted to its in-image part */
+        sy0 = iy0 - rh / 2 < 0 ? rh / 2 - iy0 : 0;
+        sy1 = iy0 - rh / 2 + rh > im->h ? im->h - iy0 + rh / 2 : rh;
+        sx0 = ix0 - rw / 2 < 0 ? rw / 2 - ix0 : 0;
+        sx1 = ix0 - rw / 2 + rw > im->w ? im->w - ix0 + rw / 2 : rw;
 
-          if (errisarray) {
-            errort = (const char *)im->noise + pos * esize;
-            varpix = econvert(errort);
-            if (errisstd) varpix *= varpix;
-          } else if (im->noise_type != SEP_NOISE_NONE) {
-            varpix = errisstd ? im->noiseval * im->noiseval : im->noiseval;
+        for (i = 0; i < nterms; i++) terms[i] /= psfsum;
+        for (sy = sy0; sy < sy1; sy++) {
+          double *st = stamp + sy * rw;
+          for (sx = sx0; sx < sx1; sx++) st[sx] = terms[0] * rcomp[sy * rw + sx];
+          for (i = 1; i < nterms; i++) {
+            const double t = terms[i];
+            const double *rc = rcomp + (size_t)i * rnpix + sy * rw;
+            for (sx = sx0; sx < sx1; sx++) st[sx] += t * rc[sx];
           }
+        }
 
-          if (varpix <= 0.0) continue;
+        for (sy = sy0; sy < sy1; sy++) {
+          const double *st = stamp + sy * rw;
+          int64_t row = (int64_t)(iy0 - rh / 2 + sy) * im->w + (ix0 - rw / 2);
+          const double *wd = wdata + row;
+          const double *wi = winv + row;
 
-          total_var = varpix;
-          if (im->gain > 0.0 && pix > 0.0) {
-            total_var += pix / im->gain;
-          }
-
-          {
-            double invvar = 1.0 / total_var;
-            num += psfw * pix * invvar;
-            den += psfw * psfw * invvar;
-            if (local_bkg) {
-              sumpw += psfw * invvar;
-              sumdw += pix * invvar;
-              sumw += invvar;
+          if (local_bkg) {
+            for (sx = sx0; sx < sx1; sx++) {
+              double psfw = st[sx];
+              if (psfw == 0.0) continue;
+              num += psfw * wd[sx];
+              den += psfw * psfw * wi[sx];
+              sumpw += psfw * wi[sx];
+              sumdw += wd[sx];
+              sumw += wi[sx];
+            }
+          } else {
+            for (sx = sx0; sx < sx1; sx++) {
+              double psfw = st[sx];
+              num += psfw * wd[sx];
+              den += psfw * psfw * wi[sx];
             }
           }
         }
-      }
 
-      if (local_bkg) {
-        double det = den * sumw - sumpw * sumpw;
-        if (det > 0.0 && sumw > 0.0) {
-          out[opos] = (num * sumw - sumpw * sumdw) / sqrt(det * sumw);
+        if (local_bkg) {
+          double det = den * sumw - sumpw * sumpw;
+          if (det > 0.0 && sumw > 0.0) {
+            out[opos] = (num * sumw - sumpw * sumdw) / sqrt(det * sumw);
+          }
+        } else if (den > 0.0) {
+          out[opos] = num / sqrt(den);
         }
-      } else if (den > 0.0) {
-        out[opos] = num / sqrt(den);
       }
     }
+
+  varying_exit:
+    free(rcomp);
+    free(rsum);
+    free(stamp);
+    free(terms);
+    free(dxp);
+    free(dyp);
+    free(wdata);
+    free(winv);
   }
 
   return status;

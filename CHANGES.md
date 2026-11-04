@@ -1,6 +1,12 @@
 Unreleased
 ==========
 
+* Speed up `psf_snr` (and so `psf_peaks` and `psf_extract`) for spatially
+  varying PSFs by 2.5-8x (most for supersampled models): the PSF components are resampled once and combined
+  linearly at each pixel, instead of rebuilding and resampling the
+  supersampled PSF at every output pixel. Results are unchanged to float
+  precision.
+
 v1.5.2 (31 October 2026)
 =======================
 

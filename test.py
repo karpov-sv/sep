@@ -2306,6 +2306,70 @@ def test_psf_snr_matches_spatially_varying_constant_component():
     assert_allclose(snr_fast, snr_generic, rtol=1e-7, atol=1e-10)
 
 
+@pytest.mark.parametrize(
+    "sampling, sampled", [(1.0, True), (0.5, True), (0.5, False)]
+)
+@pytest.mark.parametrize("noise", ["scalar", "err", "mask", "gain", "local_bkg"])
+def test_psf_snr_spatially_varying_matches_local_constant_psf(sampling, sampled, noise):
+    """Varying-PSF S/N at a pixel equals the S/N of the PSF built there."""
+    rng = np.random.default_rng(2024)
+    degree = 2
+    oversampling = int(round(1.0 / sampling))
+    size = 13 * oversampling + (1 - (13 * oversampling) % 2)
+    base = _gaussian_kernel(size, 1.5 * oversampling).astype(np.float64)
+    comps = [base]
+    for _ in range(1, (degree + 1) * (degree + 2) // 2):
+        other = _gaussian_kernel(size, (1.2 + rng.random()) * oversampling)
+        comps.append(0.3 * (other - base))
+    comps = np.array(comps, dtype=np.float32)
+    x0, y0, sx, sy = 20.0, 15.0, 25.0, 20.0
+    psf = sep.PSF(
+        comps,
+        sampling=sampling,
+        degree=degree,
+        x0=x0,
+        y0=y0,
+        sx=sx,
+        sy=sy,
+        fwhm=3.5,
+        sampled=sampled,
+    )
+
+    data = rng.normal(size=(37, 43))
+    data[18, 21] += 40.0
+    err = 1.0 + rng.random(size=data.shape)
+    mask = np.zeros(data.shape, dtype=bool)
+    mask[16:20, 20:23] = True
+    kwargs = {
+        "scalar": dict(var=2.0),
+        "err": dict(err=err),
+        "mask": dict(err=err, mask=mask),
+        "gain": dict(err=err, gain=2.0),
+        "local_bkg": dict(err=err, mask=mask, local_bkg=True),
+    }[noise]
+
+    snr = sep.psf_snr(data, psf, **kwargs)
+
+    # Interior, edge and corner pixels
+    for iy, ix in [(18, 21), (0, 0), (36, 42), (5, 40), (30, 2), (18, 0)]:
+        dx, dy = (ix - x0) / sx, (iy - y0) / sy
+        terms = [
+            dx**i1 * dy**i2
+            for i2 in range(degree + 1)
+            for i1 in range(degree + 1 - i2)
+        ]
+        local = np.tensordot(np.array(terms), comps.astype(np.float64), axes=1)
+        psf_local = sep.PSF(
+            local.astype(np.float32),
+            sampling=sampling,
+            degree=0,
+            fwhm=3.5,
+            sampled=sampled,
+        )
+        expected = sep.psf_snr(data, psf_local, **kwargs)[iy, ix]
+        assert_allclose(snr[iy, ix], expected, rtol=1e-5, atol=1e-6)
+
+
 def test_psf_snr_matches_matched_filter_for_constant_psf():
     """Constant-PSF S/N matches the extract matched-filter statistic."""
     rng = np.random.default_rng(123)
