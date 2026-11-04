@@ -8,6 +8,12 @@ Unreleased
   precision.
 * Fix a crash in `extract` when the supplied segmentation map contains no
   objects; an empty catalog is now returned.
+* Fix cleaning with matched filtering in `extract`: object margins above the
+  threshold were computed from convolved data minus a threshold in unconvolved
+  noise units, and could be negative for well-detected objects, which were then
+  removed near any brighter neighbour (up to a quarter of S/N 10-30 stars with
+  a sigma=1.5 px kernel). Cleaning now works in S/N units, and matches the
+  SExtractor-style cleaning of the convolved image at the equivalent threshold.
 
 v1.5.2 (31 October 2026)
 =======================

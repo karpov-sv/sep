@@ -121,9 +121,16 @@ int analysemthresh(int objnb, objliststruct * objlist, int minarea, PIXTYPE thre
   /*-- Find the minareath pixel in decreasing intensity for CLEANing */
   for (pixt = pixel + obj->firstpix; pixt >= pixel; pixt = pixel + PLIST(pixt, nextpix))
   {
-    /* amount pixel is above threshold */
-    tpix = PLISTPIX(pixt, cdvalue)
-           - (PLISTEXIST(thresh) ? PLISTPIX(pixt, thresh) : thresh);
+    /* amount pixel is above threshold. With matched filtering, detection was
+     * on the S/N statistic, and `thresh` is the S/N threshold: cdvalue and the
+     * per-pixel (unconvolved data) threshold are in different units, and
+     * their difference may be negative for well-detected pixels. */
+    if (PLISTEXIST(detvalue)) {
+      tpix = PLISTPIX(pixt, detvalue) - thresh;
+    } else {
+      tpix = PLISTPIX(pixt, cdvalue)
+             - (PLISTEXIST(thresh) ? PLISTPIX(pixt, thresh) : thresh);
+    }
     if (h > 0) {
       *(heapt++) = (float)tpix;
     } else if (h) {

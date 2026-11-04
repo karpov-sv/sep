@@ -78,7 +78,9 @@ int segsortit(
     double gain
 );
 void plistinit(int hasconv, int hasdet, int hasvar);
-void clean(objliststruct * objlist, double clean_param, int * survives);
+void clean(
+    objliststruct * objlist, double clean_param, double detthresh, int * survives
+);
 PIXTYPE get_mean_thresh(infostruct * info, pliststruct * pixel);
 int convert_to_catalog(
     objliststruct * objlist,
@@ -179,17 +181,42 @@ static float clean_choose_small_a_max(const objliststruct * objlist) {
   return limit;
 }
 
+/* Profile model of an object used for cleaning: amp * (1 + alpha*r^2)^-beta,
+ * reaching the detection threshold at the object's isophotal area.
+ *
+ * With matched filtering (detthresh > 0) objects are detected on the S/N
+ * statistic, while fdflux is in convolved data units and obj->thresh in
+ * unconvolved data units. The amplitude is then converted to S/N units with
+ * the object's peak S/N to convolved-data ratio, and compared with detthresh,
+ * consistently with mthresh (see analysemthresh()). */
+static void clean_profile(
+    const objstruct *obj, double beta, double detthresh, double *amp, double *alpha
+) {
+  double unitarea = PI * obj->a * obj->b;
+  double a = obj->fdflux / (2 * unitarea * obj->abcor);
+  double t = obj->thresh;
+
+  if (detthresh > 0.0 && obj->fdpeak > 0.0 && obj->detpeak > 0.0) {
+    a *= obj->detpeak / obj->fdpeak;
+    t = detthresh;
+  }
+
+  *amp = a;
+  *alpha = (pow(a / t, 1.0 / beta) - 1) * unitarea / obj->fdnpix;
+}
+
 static void clean_compare_pair(
     const objstruct *obj1,
     const objstruct *obj2,
     int64_t i,
     int64_t j,
     double beta,
+    double detthresh,
     double ampin,
     double alphain,
     int *survives
 ) {
-  double amp, alpha, unitarea, val;
+  double amp, alpha, val;
   float dx, dy, rlim;
 
   dx = obj1->mx - obj2->mx;
@@ -208,9 +235,7 @@ static void clean_compare_pair(
       survives[j] = 0;
     }
   } else {
-    unitarea = PI * obj2->a * obj2->b;
-    amp = obj2->fdflux / (2 * unitarea * obj2->abcor);
-    alpha = (pow(amp / obj2->thresh, 1.0 / beta) - 1) * unitarea / obj2->fdnpix;
+    clean_profile(obj2, beta, detthresh, &amp, &alpha);
     val = 1 + alpha * (obj2->cxx * dx * dx + obj2->cyy * dy * dy + obj2->cxy * dx * dy);
     if (val > 1.0
         && ((float)(val < 1e10 ? amp * pow(val, -beta) : 0.0) > obj1->mthresh))
@@ -220,10 +245,12 @@ static void clean_compare_pair(
   }
 }
 
-static void clean_naive(objliststruct * objlist, double clean_param, int * survives) {
+static void clean_naive(
+    objliststruct * objlist, double clean_param, double detthresh, int * survives
+) {
   const objstruct *obj1, *obj2;
   int64_t i, j;
-  double ampin, alphain, unitareain, beta;
+  double ampin, alphain, beta;
 
   beta = clean_param;
 
@@ -237,9 +264,7 @@ static void clean_naive(objliststruct * objlist, double clean_param, int * survi
       continue;
     }
 
-    unitareain = PI * obj1->a * obj1->b;
-    ampin = obj1->fdflux / (2 * unitareain * obj1->abcor);
-    alphain = (pow(ampin / obj1->thresh, 1.0 / beta) - 1) * unitareain / obj1->fdnpix;
+    clean_profile(obj1, beta, detthresh, &ampin, &alphain);
 
     obj2 = obj1 + 1;
     for (j = i + 1; j < objlist->nobj; j++, obj2++) {
@@ -247,7 +272,7 @@ static void clean_naive(objliststruct * objlist, double clean_param, int * survi
         continue;
       }
 
-      clean_compare_pair(obj1, obj2, i, j, beta, ampin, alphain, survives);
+      clean_compare_pair(obj1, obj2, i, j, beta, detthresh, ampin, alphain, survives);
     }
   }
 }
@@ -1137,16 +1162,22 @@ int sep_extract_with_pixels_ex(
     /* convert `finalobjlist` to an array of `sepobj` structs */
     /* if cleaning, see which objects "survive" cleaning. */
     if (clean_flag) {
+      /* With matched filtering, objects were detected on the S/N statistic,
+       * so cleaning works in S/N units with the S/N threshold. */
+      double detthresh = PLISTEXIST(detvalue) ? relthresh : 0.0;
+
       /* Calculate mthresh for all objects in the list (needed for cleaning) */
       for (i = 0; i < finalobjlist->nobj; i++) {
-        status = analysemthresh(i, finalobjlist, minarea, thresh);
+        status = analysemthresh(
+            i, finalobjlist, minarea, PLISTEXIST(detvalue) ? relthresh : thresh
+        );
         if (status != RETURN_OK) {
           goto exit;
         }
       }
 
       QMALLOC(survives, int, finalobjlist->nobj, status);
-      clean(finalobjlist, clean_param, survives);
+      clean(finalobjlist, clean_param, detthresh, survives);
     }
   }
   /* convert to output catalog */
@@ -1456,7 +1487,9 @@ Fill a list with whether each object in the list survived the cleaning
 (assumes that mthresh has already been calculated for all objects in the list)
 */
 
-void clean(objliststruct * objlist, double clean_param, int * survives) {
+void clean(
+    objliststruct * objlist, double clean_param, double detthresh, int * survives
+) {
   const objstruct *obj1;
   clean_cell_entry *small_entries = NULL;
   int64_t *large_indices = NULL;
@@ -1464,7 +1497,7 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
   int64_t nsmall = 0, nlarge = 0, ncells = 0;
   int64_t i, j, k, cell_idx, grid_w = 0, grid_h = 0;
   double ampin, alphain, beta, cell_size, reach, minx = 0.0, miny = 0.0, maxx = 0.0,
-                                          maxy = 0.0, unitareain;
+                                          maxy = 0.0;
   float small_a_max;
 
   beta = clean_param;
@@ -1472,7 +1505,7 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
   cell_size = CLEAN_ZONE * (double)small_a_max;
 
   if (!(small_a_max > 0.0f) || !(cell_size > 0.0)) {
-    clean_naive(objlist, clean_param, survives);
+    clean_naive(objlist, clean_param, detthresh, survives);
     return;
   }
 
@@ -1565,9 +1598,7 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
       continue;
     }
 
-    unitareain = PI * obj1->a * obj1->b;
-    ampin = obj1->fdflux / (2 * unitareain * obj1->abcor);
-    alphain = (pow(ampin / obj1->thresh, 1.0 / beta) - 1) * unitareain / obj1->fdnpix;
+    clean_profile(obj1, beta, detthresh, &ampin, &alphain);
 
     for (k = 0; k < nlarge; k++) {
       j = large_indices[k];
@@ -1575,7 +1606,9 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
         continue;
       }
 
-      clean_compare_pair(obj1, objlist->obj + j, i, j, beta, ampin, alphain, survives);
+      clean_compare_pair(
+              obj1, objlist->obj + j, i, j, beta, detthresh, ampin, alphain, survives
+          );
     }
 
     if (!nsmall) {
@@ -1609,7 +1642,9 @@ void clean(objliststruct * objlist, double clean_param, int * survives) {
             continue;
           }
 
-          clean_compare_pair(obj1, objlist->obj + j, i, j, beta, ampin, alphain, survives);
+          clean_compare_pair(
+              obj1, objlist->obj + j, i, j, beta, detthresh, ampin, alphain, survives
+          );
         }
       }
     }
@@ -1628,7 +1663,7 @@ fallback:
   free(cell_ids);
   free(large_indices);
   free(small_entries);
-  clean_naive(objlist, clean_param, survives);
+  clean_naive(objlist, clean_param, detthresh, survives);
 }
 
 /************************** get_mean_thresh **********************************/
