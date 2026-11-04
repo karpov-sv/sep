@@ -523,6 +523,26 @@ int sep_extract_with_pixels_ex(
   w = image->w;
   h = image->h;
 
+  /* A segmentation map without object ids has nothing to analyse: return an
+   * empty catalog rather than indexing the (empty) id and count arrays. */
+  if (image->segmap && image->numids <= 0) {
+    objliststruct emptylist;
+
+    memset(&emptylist, 0, sizeof(emptylist));
+    cat = (sep_catalog *)calloc(1, sizeof(sep_catalog));
+    if (!cat) {
+      *catalog = NULL;
+      return MEMORY_ALLOC_ERROR;
+    }
+    status = convert_to_catalog(&emptylist, NULL, cat, w, include_pixels);
+    if (status != RETURN_OK) {
+      sep_catalog_free(cat);
+      cat = NULL;
+    }
+    *catalog = cat;
+    return status;
+  }
+
   numids = (image->numids) ? image->numids : 1;
 
   prevpix = 0;

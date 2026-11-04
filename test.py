@@ -994,6 +994,26 @@ def test_extract_segmentation_map():
 
 
 @pytest.mark.skipif(NO_FITS, reason="no FITS reader")
+@pytest.mark.parametrize("use_mask", [False, True])
+def test_extract_seg_map_without_objects(use_mask):
+    """A segmentation map without objects yields an empty catalog."""
+    rng = np.random.default_rng(3)
+    data = rng.normal(size=(40, 50))
+    err = np.ones_like(data)
+    mask = np.zeros(data.shape, dtype=bool)
+    mask[:5] = True
+    segmap = np.zeros(data.shape, dtype=np.int32)
+
+    objects, segmap_out = sep.extract(
+        data, 1.5, err=err, mask=mask if use_mask else None, segmentation_map=segmap
+    )
+    reference = sep.extract(data, 1.5, err=err)
+
+    assert len(objects) == 0
+    assert objects.dtype == reference.dtype
+    assert_equal(segmap_out, segmap)
+
+
 def test_extract_seg_map_array():
     """
     Test the extraction when an existing segmentation map is supplied.

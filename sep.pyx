@@ -925,11 +925,16 @@ def extract(np.ndarray data not None, float thresh, err=None, var=None,
                 "supplied."
             )
 
-        idbuf = segids.view(dtype=np.int64)
-        countbuf = idcounts.view(dtype=np.int64)
-        im.segids = <np.int64_t*>&idbuf[0]
-        im.idcounts = <np.int64_t*>&countbuf[0]
         im.numids = len(segids)
+        if im.numids > 0:
+            idbuf = segids.view(dtype=np.int64)
+            countbuf = idcounts.view(dtype=np.int64)
+            im.segids = <np.int64_t*>&idbuf[0]
+            im.idcounts = <np.int64_t*>&countbuf[0]
+        else:
+            # No objects in the map; sep_extract() returns an empty catalog
+            im.segids = NULL
+            im.idcounts = NULL
     else:
         _parse_arrays(data, err, var, mask, None, &im)
     im.maskthresh = maskthresh

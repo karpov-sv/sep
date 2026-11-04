@@ -6,6 +6,8 @@ Unreleased
   linearly at each pixel, instead of rebuilding and resampling the
   supersampled PSF at every output pixel. Results are unchanged to float
   precision.
+* Fix a crash in `extract` when the supplied segmentation map contains no
+  objects; an empty catalog is now returned.
 
 v1.5.2 (31 October 2026)
 =======================
