@@ -8,6 +8,9 @@ Unreleased
   precision.
 * Fix a crash in `extract` when the supplied segmentation map contains no
   objects; an empty catalog is now returned.
+* Fix `extract` with a supplied segmentation map for single-pixel segments:
+  their pixel lists were not terminated and ran into the following segments,
+  giving wrong `npix`, `tnpix`, positions, shapes and fluxes.
 * Fix cleaning with matched filtering in `extract`: object margins above the
   threshold were computed from convolved data minus a threshold in unconvolved
   noise units, and could be negative for well-detected objects, which were then

@@ -1073,6 +1073,29 @@ def test_extract_seg_map_without_objects(use_mask):
     assert_equal(segmap_out, segmap)
 
 
+def test_extract_seg_map_single_pixel_segments():
+    """Single-pixel segments of a supplied segmentation map are measured
+    from their own pixel only, not merged with the following segments."""
+    rng = np.random.default_rng(0)
+    data = rng.normal(size=(64, 64))
+    segmap = np.zeros(data.shape, dtype=np.int32)
+    pixels = {1: [(10, 5)], 2: [(10, 40)], 3: [(30, 20), (30, 21)], 4: [(50, 50)]}
+    for i, pix in pixels.items():
+        for y, x in pix:
+            segmap[y, x] = i
+            data[y, x] += 50.0 + 10 * i
+
+    objects, _ = sep.extract(data, 1.0, segmentation_map=segmap)
+
+    assert len(objects) == len(pixels)
+    for obj, pix in zip(objects, pixels.values()):
+        ys, xs = np.transpose(pix)
+        assert obj["npix"] == len(pix)
+        assert_allclose(obj["x"], np.average(xs, weights=data[ys, xs]), atol=0.01)
+        assert_allclose(obj["y"], np.mean(ys))
+        assert_allclose(obj["flux"], data[ys, xs].sum(), rtol=1e-5)
+
+
 def test_extract_seg_map_array():
     """
     Test the extraction when an existing segmentation map is supplied.

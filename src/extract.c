@@ -939,6 +939,13 @@ int sep_extract_with_pixels_ex(
               if (idinfo[ididx].pixnb == 0) {
                 idinfo[ididx].firstpix = prevpix * plistsize;
                 idinfo[ididx].pixnb = 1;
+                /* A single-pixel segment is also complete: terminate its
+                 * list, which otherwise runs into the next segment's pixels
+                 * (the pixel stack is pre-linked to consecutive slots). */
+                if (image->idcounts[ididx] == 1) {
+                  idinfo[ididx].lastpix = prevpix * plistsize;
+                  PLIST(pixt, nextpix) = -1;
+                }
               } else if (idinfo[ididx].pixnb == image->idcounts[ididx] - 1) {
                 idinfo[ididx].pixnb++;
                 idinfo[ididx].lastpix = prevpix * plistsize;
