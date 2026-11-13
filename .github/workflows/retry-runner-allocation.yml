@@ -1,0 +1,50 @@
+name: Retry runner allocation failures
+
+on:
+  workflow_run:
+    workflows: [CI, build-wheels-upload-pypi]
+    types: [completed]
+  # Also recover if a completion event is missed or suppressed during a rerun.
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run to recover (blank checks recent failed runs)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retry-runner-allocation
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      checks: read
+    steps:
+      # This workflow has write access. Only execute code from the default
+      # branch, never from the failed run or its artifacts.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Test recovery rules
+        run: node --test .github/scripts/retry-runner-allocation.test.cjs
+      - uses: actions/github-script@v7
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+        with:
+          script: |
+            const recover = require('./.github/scripts/retry-runner-allocation.cjs');
+            await recover({github, context, core, runId: process.env.RUN_ID});
