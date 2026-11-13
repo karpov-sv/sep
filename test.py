@@ -1712,6 +1712,31 @@ def test_stats_circann_clipping_rejects_source_contamination():
     assert flag[0] == 0
 
 
+@pytest.mark.parametrize("clip_iters", [0, 5])
+@pytest.mark.parametrize("err", ["array", "scalar"])
+def test_bkgann_adds_annulus_noise(clip_iters, err):
+    """Flux errors include the noise of the annulus background, also with clipping
+    (sigma-clipped annulus statistics used to ignore the noise map)."""
+    data = np.zeros((100, 100))
+    noise = np.ones_like(data) if err == "array" else 1.0
+    x, y, r, rin, rout = [50.0], [50.0], 4.0, 8.0, 12.0
+
+    _, fluxerr0, _ = sep.sum_circle(data, x, y, r, err=noise, subpix=1)
+    _, fluxerr, _ = sep.sum_circle(
+        data, x, y, r, err=noise, bkgann=(rin, rout), subpix=1, clip_iters=clip_iters
+    )
+    # Noise of the mean of the annulus pixels, times the aperture area
+    nann = sep.sum_circann(np.ones_like(data), x, y, rin, rout, subpix=1)[0]
+    bkgerr = fluxerr0**2 / np.sqrt(nann)
+    assert_allclose(fluxerr, np.hypot(fluxerr0, bkgerr), rtol=1e-6)
+
+    _, fluxerr0, _ = sep.sum_circle_optimal(data, x, y, r, 3.0, err=noise)
+    _, fluxerr, _ = sep.sum_circle_optimal(
+        data, x, y, r, 3.0, err=noise, bkgann=(rin, rout), clip_iters=clip_iters
+    )
+    assert np.all(fluxerr > 1.01 * fluxerr0)
+
+
 def test_aperture_bkgann_overlapping():
     """
     Test bkgann functionality in circular & elliptical apertures.

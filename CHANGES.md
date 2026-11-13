@@ -17,6 +17,11 @@ Unreleased
   removed near any brighter neighbour (up to a quarter of S/N 10-30 stars with
   a sigma=1.5 px kernel). Cleaning now works in S/N units, and matches the
   SExtractor-style cleaning of the convolved image at the equivalent threshold.
+* Fix the noise of the annulus background in `sum_circle`, `sum_circle_optimal`
+  and other aperture functions with `bkgann`: the sigma-clipped annulus
+  statistics (used with the default `clip_iters > 0`) ignored the noise map, so
+  the uncertainty of the subtracted background was not added to the flux
+  errors. It was only added with `clip_iters=0`.
 
 v1.5.2 (31 October 2026)
 =======================

@@ -2430,6 +2430,19 @@ int sep_stats_circann(
     return status;
   }
 
+  /* noise: per-pixel array or a constant, as variance or standard deviation */
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize))) {
+        return status;
+      }
+    } else {
+      varpix_const = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
+    }
+  }
+
   /* get extent of box */
   boxextent(x, y, rout, rout, im->w, im->h, &xmin, &xmax, &ymin, &ymax, flag);
 
@@ -2769,6 +2782,19 @@ int sep_stats_ellipann(
   }
   if (im->segmap && (status = get_converter(im->sdtype, &sconvert, &ssize))) {
     return status;
+  }
+
+  /* noise: per-pixel array or a constant, as variance or standard deviation */
+  if (im->noise_type != SEP_NOISE_NONE) {
+    errisstd = (im->noise_type == SEP_NOISE_STDDEV);
+    if (im->noise) {
+      errisarray = 1;
+      if ((status = get_converter(im->ndtype, &econvert, &esize))) {
+        return status;
+      }
+    } else {
+      varpix_const = (errisstd) ? im->noiseval * im->noiseval : im->noiseval;
+    }
   }
 
   boxextent_ellipse(x, y, cxx, cyy, cxy, rout, im->w, im->h, &xmin, &xmax, &ymin, &ymax,
