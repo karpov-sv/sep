@@ -537,6 +537,10 @@ SEP_API int sep_sum_circann(
  * Compute statistics within a circular annulus. The MAD output is scaled
  * by 1.4826, providing a robust estimate of the standard deviation for
  * Gaussian data.
+ * The area and sumerr outputs describe the retained pixels used for
+ * mean_clip, including their supplied noise and gain contribution.
+ * Divide sumerr by area to obtain the uncertainty of mean_clip.
+ * The same convention applies to sep_stats_ellipann().
  */
 SEP_API int sep_stats_circann(
     const sep_image * image,

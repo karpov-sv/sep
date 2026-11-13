@@ -1,27 +1,28 @@
 Unreleased
 ==========
 
+v1.5.3 (13 November 2026)
+========================
+
 * Speed up `psf_snr` (and so `psf_peaks` and `psf_extract`) for spatially
-  varying PSFs by 2.5-8x (most for supersampled models): the PSF components are resampled once and combined
-  linearly at each pixel, instead of rebuilding and resampling the
-  supersampled PSF at every output pixel. Results are unchanged to float
-  precision.
+  varying PSFs by 2.5-8x, with the largest gains for supersampled models.
+  PSF components are resampled once and combined at each output pixel.
+  Results are unchanged to float precision.
 * Fix a crash in `extract` when the supplied segmentation map contains no
   objects; an empty catalog is now returned.
 * Fix `extract` with a supplied segmentation map for single-pixel segments:
   their pixel lists were not terminated and ran into the following segments,
   giving wrong `npix`, `tnpix`, positions, shapes and fluxes.
-* Fix cleaning with matched filtering in `extract`: object margins above the
-  threshold were computed from convolved data minus a threshold in unconvolved
-  noise units, and could be negative for well-detected objects, which were then
-  removed near any brighter neighbour (up to a quarter of S/N 10-30 stars with
-  a sigma=1.5 px kernel). Cleaning now works in S/N units, and matches the
-  SExtractor-style cleaning of the convolved image at the equivalent threshold.
-* Fix the noise of the annulus background in `sum_circle`, `sum_circle_optimal`
-  and other aperture functions with `bkgann`: the sigma-clipped annulus
-  statistics (used with the default `clip_iters > 0`) ignored the noise map, so
-  the uncertainty of the subtracted background was not added to the flux
-  errors. It was only added with `clip_iters=0`.
+* Fix cleaning with matched filtering in `extract` incorrectly removing
+  well-detected objects near brighter neighbours. Cleaning now compares
+  object margins and profiles consistently in S/N units.
+* Fix local background uncertainty in `sum_circle`, `sum_ellipse`, and
+  `sum_circle_optimal` with `bkgann` and sigma clipping (`clip_iters > 0`,
+  the default). Annulus statistics now include supplied errors or variances
+  and use only retained pixels for the uncertainty, gain contribution, and
+  area normalization. The C `sep_stats_circann` and `sep_stats_ellipann`
+  outputs `area` and `sumerr` describe the retained pixels used for
+  `mean_clip`.
 
 v1.5.2 (31 October 2026)
 =======================

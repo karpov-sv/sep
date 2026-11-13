@@ -187,6 +187,7 @@ static void oversamp_ann_ellipse(double r, double b, double * r_in2, double * r_
 typedef struct {
   double v;
   double w;
+  double var;
 } valweight;
 
 static int cmp_valweight(const void *a, const void *b) {
@@ -2358,7 +2359,7 @@ int sep_stats_circann(
   double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
   double rin2, rin_in2, rin_out2, rout2, rout_in2, rout_out2;
   double totw, sumw, varw, diff, wsum, vsum;
-  double tv, sigtv, varpix, varpix_const;
+  double sigtv, varpix, varpix_const;
   double med, madv, sig, totw_keep;
   double lo, hi;
   int64_t ix, iy, i, xmin, xmax, ymin, ymax, sx, sy, pos, size, msize, ssize, nkeep;
@@ -2457,8 +2458,6 @@ int sep_stats_circann(
 
   nvals = 0;
   totw = 0.0;
-  tv = 0.0;
-  sigtv = 0.0;
 
   /* loop over rows in the box */
   for (iy = ymin; iy < ymax; iy++) {
@@ -2539,7 +2538,6 @@ int sep_stats_circann(
             vw[nvals].v = pix;
             vw[nvals].w = overlap;
             totw += overlap;
-            tv += pix * overlap;
             if (errisarray) {
               varpix = econvert(errort);
               if (errisstd) {
@@ -2548,7 +2546,7 @@ int sep_stats_circann(
             } else {
               varpix = varpix_const;
             }
-            sigtv += varpix * overlap;
+            vw[nvals].var = varpix;
             nvals++;
           }
         }
@@ -2635,12 +2633,15 @@ int sep_stats_circann(
     }
   }
 
+  /* Background mean and uncertainty must use the same retained pixels. */
   wsum = 0.0;
   vsum = 0.0;
+  sigtv = 0.0;
   for (i = 0; i < nvals; i++) {
     if (keep[i] && vw[i].w > 0.0) {
       wsum += vw[i].w;
       vsum += vw[i].w * vw[i].v;
+      sigtv += vw[i].w * vw[i].var;
     }
   }
   *mean_clip = (wsum > 0.0) ? (vsum / wsum) : NAN;
@@ -2657,14 +2658,14 @@ int sep_stats_circann(
   madv = weighted_median_sorted(vw, nvals, totw);
   *mad_std = madv * mad_scale;
 
-  if (im->gain > 0.0 && tv > 0.0) {
-    sigtv += tv / im->gain;
+  if (im->gain > 0.0 && vsum > 0.0) {
+    sigtv += vsum / im->gain;
   }
   if (sigtv < 0.0) {
     sigtv = 0.0;
   }
   *sumerr = sqrt(sigtv);
-  *area = totw;
+  *area = wsum;
 
 exit:
   if (keep) {
@@ -2711,7 +2712,7 @@ int sep_stats_ellipann(
   double cxx, cyy, cxy;
   double rin2, rin_in2, rin_out2, rout2, rout_in2, rout_out2;
   double totw, sumw, varw, diff, wsum, vsum;
-  double tv, sigtv, varpix, varpix_const;
+  double sigtv, varpix, varpix_const;
   double med, madv, sig, totw_keep;
   double lo, hi;
   int64_t ix, iy, i, xmin, xmax, ymin, ymax, sx, sy, pos, size, msize, ssize, nkeep;
@@ -2811,8 +2812,6 @@ int sep_stats_ellipann(
 
   nvals = 0;
   totw = 0.0;
-  tv = 0.0;
-  sigtv = 0.0;
 
   for (iy = ymin; iy < ymax; iy++) {
     pos = (iy % im->h) * im->w + xmin;
@@ -2884,7 +2883,6 @@ int sep_stats_ellipann(
             vw[nvals].v = pix;
             vw[nvals].w = overlap;
             totw += overlap;
-            tv += pix * overlap;
             if (errisarray) {
               varpix = econvert(errort);
               if (errisstd) {
@@ -2893,7 +2891,7 @@ int sep_stats_ellipann(
             } else {
               varpix = varpix_const;
             }
-            sigtv += varpix * overlap;
+            vw[nvals].var = varpix;
             nvals++;
           }
         }
@@ -2977,12 +2975,15 @@ int sep_stats_ellipann(
     }
   }
 
+  /* Background mean and uncertainty must use the same retained pixels. */
   wsum = 0.0;
   vsum = 0.0;
+  sigtv = 0.0;
   for (i = 0; i < nvals; i++) {
     if (keep[i] && vw[i].w > 0.0) {
       wsum += vw[i].w;
       vsum += vw[i].w * vw[i].v;
+      sigtv += vw[i].w * vw[i].var;
     }
   }
   *mean_clip = (wsum > 0.0) ? (vsum / wsum) : NAN;
@@ -2997,14 +2998,14 @@ int sep_stats_ellipann(
   madv = weighted_median_sorted(vw, nvals, totw);
   *mad_std = madv * mad_scale;
 
-  if (im->gain > 0.0 && tv > 0.0) {
-    sigtv += tv / im->gain;
+  if (im->gain > 0.0 && vsum > 0.0) {
+    sigtv += vsum / im->gain;
   }
   if (sigtv < 0.0) {
     sigtv = 0.0;
   }
   *sumerr = sqrt(sigtv);
-  *area = totw;
+  *area = wsum;
 
 exit:
   if (keep) {

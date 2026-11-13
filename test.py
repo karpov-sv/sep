@@ -993,7 +993,6 @@ def test_extract_segmentation_map():
         assert objects["npix"][i] == (segmap == i + 1).sum()
 
 
-@pytest.mark.skipif(NO_FITS, reason="no FITS reader")
 def _moffat_image(shape, x0, y0, flux, fwhm, beta):
     y, x = np.mgrid[: shape[0], : shape[1]]
     alpha = fwhm / (2 * np.sqrt(2 ** (1 / beta) - 1))
@@ -1096,6 +1095,7 @@ def test_extract_seg_map_single_pixel_segments():
         assert_allclose(obj["flux"], data[ys, xs].sum(), rtol=1e-5)
 
 
+@pytest.mark.skipif(NO_FITS, reason="no FITS reader")
 def test_extract_seg_map_array():
     """
     Test the extraction when an existing segmentation map is supplied.
@@ -1735,6 +1735,53 @@ def test_bkgann_adds_annulus_noise(clip_iters, err):
         data, x, y, r, 3.0, err=noise, bkgann=(rin, rout), clip_iters=clip_iters
     )
     assert np.all(fluxerr > 1.01 * fluxerr0)
+
+
+@pytest.mark.parametrize("aperture", ["circle", "ellipse", "optimal", "grouped"])
+@pytest.mark.parametrize("noise", ["scalar_err", "array_err", "array_var"])
+@pytest.mark.parametrize("gain", [None, 2.0])
+def test_bkgann_clipped_noise_matches_explicit_mask(aperture, noise, gain):
+    """Rejected annulus pixels contribute neither noise nor background area."""
+    y, x = np.mgrid[:100, :100]
+    data = 100.0 + 0.1 * (x - 50) + 0.2 * (y - 50)
+    rejected = np.zeros(data.shape, dtype=bool)
+    rejected[50, 60:62] = True
+    data[rejected] = 1e6
+    err = 1.0 + x / 100.0 + y / 200.0
+    err[rejected] = 1e6
+    kwargs = {
+        "scalar_err": dict(err=2.0),
+        "array_err": dict(err=err),
+        "array_var": dict(var=err**2),
+    }[noise]
+    kwargs.update(bkgann=(8.0, 12.0), gain=gain, subpix=1)
+
+    def measure(**options):
+        if aperture == "circle":
+            return sep.sum_circle(data, [50.0], [50.0], 4.0, **kwargs, **options)
+        if aperture == "ellipse":
+            return sep.sum_ellipse(
+                data, [50.0], [50.0], 1.2, 0.9, 0.2, 4.0, **kwargs, **options
+            )
+        return sep.sum_circle_optimal(
+            data,
+            [50.0],
+            [50.0],
+            4.0,
+            3.0,
+            grouped=aperture == "grouped",
+            **kwargs,
+            **options,
+        )
+
+    clipped = measure(clip_iters=5)
+    # Keep the clipping path for the reference: legacy elliptical annuli
+    # correct masked areas rather than ignoring them.
+    masked = measure(mask=rejected, clip_iters=5)
+    unclipped = measure(clip_iters=0)
+    assert_allclose(clipped[0], masked[0], atol=1e-10)
+    assert_allclose(clipped[1], masked[1], rtol=1e-7)
+    assert np.all(np.abs(unclipped[0] - clipped[0]) > 1e4)
 
 
 def test_aperture_bkgann_overlapping():
@@ -2495,6 +2542,26 @@ def test_psf_snr_spatially_varying_matches_local_constant_psf(sampling, sampled,
         )
         expected = sep.psf_snr(data, psf_local, **kwargs)[iy, ix]
         assert_allclose(snr[iy, ix], expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf])
+def test_psf_snr_varying_zero_weights_ignore_nonfinite_pixels(bad_value):
+    """Zero PSF weights must not spread nonfinite data beyond the support."""
+    base = np.zeros((7, 7), dtype=np.float32)
+    base[3, 3] = 1.0
+    constant = sep.PSF(base)
+    varying = sep.PSF(
+        np.array([base, np.zeros_like(base), np.zeros_like(base)]), degree=1
+    )
+    data = np.ones((15, 15))
+    data[7, 8] = bad_value
+
+    expected = sep.psf_snr(data, constant)
+    actual = sep.psf_snr(data, varying)
+
+    assert_allclose(actual, expected)
+    assert actual[7, 7] == 1.0
+    assert np.count_nonzero(~np.isfinite(actual)) == 1
 
 
 def test_psf_snr_matches_matched_filter_for_constant_psf():

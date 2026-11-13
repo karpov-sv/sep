@@ -1941,6 +1941,7 @@ int sep_psf_snr(const sep_image *im, sep_psf *psf, int local_bkg,
           } else {
             for (sx = sx0; sx < sx1; sx++) {
               double psfw = st[sx];
+              if (psfw == 0.0) continue;
               num += psfw * wd[sx];
               den += psfw * psfw * wi[sx];
             }
