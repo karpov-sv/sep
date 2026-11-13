@@ -69,13 +69,12 @@ for (const change of ['executed steps', 'test failure', 'manual cancellation',
   });
 }
 
-for (const change of ['success', 'active run', 'stale event', 'obsolete ref',
+for (const change of ['success', 'active run', 'obsolete ref',
                       'foreign repository', 'pull request', 'unrelated workflow']) {
   test(`ignore ${change}`, async () => {
     const f = fixture();
     if (change === 'success') f.run.conclusion = 'success';
     if (change === 'active run') f.run.status = 'queued';
-    if (change === 'stale event') f.run.run_attempt++;
     if (change === 'obsolete ref') f.currentSha = 'new-sha';
     if (change === 'foreign repository') f.run.head_repository.full_name = 'fork/sep';
     if (change === 'pull request') f.run.event = 'pull_request';
@@ -92,6 +91,20 @@ test('scheduled checks recover the existing tag run without changing its ref', a
   assert.ok(f.requests.some(r => r.created === '>=2026-10-15T12:00:00.000Z'));
   assert.equal(f.reruns.length, 1);
   assert.equal(f.run.head_branch, 'v1.5.3');
+});
+
+test('another completion revisits a release whose annotations arrived late', async () => {
+  const f = fixture();
+  f.context.payload.workflow_run.id = 99;
+  f.annotations = [];
+  await recover(f);
+  assert.equal(f.reruns.length, 0);
+
+  f.annotations = [{message:
+    'The job was not acquired by Runner of type hosted even after multiple attempts'}];
+  await recover(f);
+  assert.equal(f.reruns.length, 1);
+  assert.equal(f.reruns[0].run_id, 42);
 });
 
 test('manual bootstrap inspects the selected run', async () => {

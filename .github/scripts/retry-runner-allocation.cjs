@@ -10,9 +10,10 @@ async function recover({github, context, core, runId = '', now = new Date()}) {
   if (runId) {
     if (!/^[1-9][0-9]*$/.test(runId)) throw new Error('Invalid run ID');
     candidates = [{id: Number(runId)}];
-  } else if (context.eventName === 'workflow_run') {
-    candidates = [context.payload.workflow_run];
   } else {
+    // Revisit all eligible failures on completion events too. GitHub may
+    // publish allocation annotations after the completion event, and cron
+    // checks can be delayed. Another run's completion can then recover it.
     // GitHub permits reruns for 30 days. Keep recovering current branch/tag
     // runs throughout that window, without repeatedly running obsolete code.
     const since = new Date(now.getTime() - 29 * 86400000).toISOString();
@@ -77,7 +78,7 @@ async function recover({github, context, core, runId = '', now = new Date()}) {
       }
     }
     if (!allocationOnly) {
-      core.info(`Run ${run.id}: contains a failure other than runner allocation; leaving it unchanged.`);
+      core.info(`Run ${run.id}: not every unsuccessful job has a confirmed allocation failure; leaving it unchanged.`);
       continue;
     }
 
