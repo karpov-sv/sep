@@ -12,7 +12,8 @@ jobs:
     strategy:
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # Python 3.9 is unavailable on Ubuntu 26.04 (ubuntu-latest).
+        os: [windows-latest, macos-latest, ubuntu-24.04]
 
     steps:
       - uses: actions/checkout@v4
