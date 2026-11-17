@@ -3,11 +3,10 @@
 
 name: build-wheels-upload-pypi
 
-on: [push, workflow_dispatch]
-  # push:
-  #   # Run this action on the trigger event when *any* tag is pushed
-  #   tags:
-  #      - '*'
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
 
 jobs:
 
