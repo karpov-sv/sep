@@ -1,6 +1,16 @@
 Unreleased
 ==========
 
+* Aperture sums (`sum_circle`, `sum_ellipse`, `sum_circann`, `sum_ellipann`)
+  now compute the uncertainty as the variance of the overlap-weighted sum,
+  using the squared pixel overlap fractions for both the per-pixel noise and
+  the Poisson term, as photutils 3.1 does. The SExtractor convention used
+  before (linear overlap weights) overestimated the noise of pixels on the
+  aperture edge, e.g. by ~3% in the flux error for a radius of 5 pixels.
+  The C `sep_stats_circann` and `sep_stats_ellipann` `sumerr` follow the same
+  convention. Local background noise from `bkgann` is unchanged, as the
+  annulus is measured in whole pixels.
+
 v1.5.3 (13 November 2026)
 ========================
 

@@ -24,7 +24,7 @@ int APER_NAME(
 ) {
   PIXTYPE pix, varpix;
   double dx, dy, dx1, dy2, offset, scale, scale2, tmp;
-  double tv, sigtv, totarea, maskarea, overlap, rpix2;
+  double tv, tv2, sigtv, totarea, maskarea, overlap, rpix2;
   int64_t ix, iy, xmin, xmax, ymin, ymax, sx, sy, pos, size, esize, msize, ssize;
   int ismasked, status;
   short errisarray, errisstd;
@@ -40,7 +40,7 @@ int APER_NAME(
 
   /* initializations */
   size = esize = msize = ssize = 0;
-  tv = sigtv = 0.0;
+  tv = tv2 = sigtv = 0.0;
   overlap = totarea = maskarea = 0.0;
   datat = maskt = segt = NULL;
   errort = im->noise;
@@ -172,7 +172,10 @@ int APER_NAME(
           maskarea += overlap;
         } else {
           tv += pix * overlap;
-          sigtv += varpix * overlap;
+          /* the sum is weighted by the overlap, so its variance is weighted by
+             the overlap squared (as in photutils >= 3.1) */
+          tv2 += pix * overlap * overlap;
+          sigtv += varpix * overlap * overlap;
         }
 
         totarea += overlap;
@@ -194,19 +197,21 @@ int APER_NAME(
     if (totarea > 0.0 && maskarea >= totarea) {
       *flag |= SEP_APER_ALLMASKED;
       tv = 0.0;
+      tv2 = 0.0;
       sigtv = 0.0;
       totarea = 0.0;
     } else if (inflag & SEP_MASK_IGNORE) {
       totarea -= maskarea;
     } else {
       tv *= (tmp = totarea / (totarea - maskarea));
+      tv2 *= tmp;
       sigtv *= tmp;
     }
   }
 
   /* add poisson noise, only if gain > 0 */
-  if (im->gain > 0.0 && tv > 0.0) {
-    sigtv += tv / im->gain;
+  if (im->gain > 0.0 && tv2 > 0.0) {
+    sigtv += tv2 / im->gain;
   }
 
   *sum = tv;

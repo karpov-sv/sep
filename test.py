@@ -349,7 +349,11 @@ def test_vs_sextractor():
         data, objs["x"], objs["y"], 5.0, err=bkg.globalrms
     )
     assert_allclose(flux, refobjs["flux_aper"], rtol=2.0e-4)
-    assert_allclose(fluxerr, refobjs["fluxerr_aper"], rtol=1.0e-5)
+    # SExtractor predicts the variance as err**2 * sum(w) with w the pixel
+    # overlap, while sep uses the variance of the weighted sum, err**2 * sum(w**2)
+    area, _, _ = sep.sum_circle(np.ones_like(data), objs["x"], objs["y"], 5.0)
+    assert_allclose(bkg.globalrms * np.sqrt(area), refobjs["fluxerr_aper"], rtol=1.0e-5)
+    assert np.all(fluxerr <= refobjs["fluxerr_aper"] * (1 + 1.0e-5))
 
     # check if the flags work at all (comparison values
     assert ((flag & sep.APER_TRUNC) != 0).sum() == 4
@@ -1710,6 +1714,54 @@ def test_stats_circann_clipping_rejects_source_contamination():
     assert_allclose(median[0], 100.0, atol=0.1)
     assert_allclose(mean_clip[0], 100.0, atol=0.1)
     assert flag[0] == 0
+
+
+def _overlap_weights(x, y, r, shape, rin=None, nsub=200):
+    """Brute-force pixel overlap with a circle (or annulus), by subsampling."""
+    off = (np.arange(nsub) + 0.5) / nsub - 0.5
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    w = np.zeros(shape)
+    for dy in off:
+        r2 = (xx[..., None] + off - x) ** 2 + (yy[..., None] + dy - y) ** 2
+        inside = r2 < r**2
+        if rin is not None:
+            inside &= r2 >= rin**2
+        w += inside.mean(axis=-1)
+    return w / nsub
+
+
+@pytest.mark.parametrize("subpix", [0, 5])
+def test_aperture_error_uses_squared_overlap(subpix):
+    """The variance of sum(w * pix) is sum(w**2 * var), including the Poisson term."""
+    shape = (31, 31)
+    x, y, r, err, gain, level = 15.3, 14.8, 4.6, 2.0, 3.0, 50.0
+    data = np.full(shape, level)
+    w = _overlap_weights(x, y, r, shape)
+    assert np.sum(w**2) < 0.95 * np.sum(w)
+
+    # Exact overlap is matched precisely, 5x5 subpixels to ~0.5%
+    rtol = 1.0e-4 if subpix == 0 else 1.0e-2
+    flux, fluxerr, _ = sep.sum_circle(data, [x], [y], r, err=err, subpix=subpix)
+    assert_allclose(flux, level * np.sum(w), rtol=rtol)
+    assert_allclose(fluxerr, err * np.sqrt(np.sum(w**2)), rtol=rtol)
+
+    flux, fluxerr, _ = sep.sum_circle(data, [x], [y], r, err=err, gain=gain, subpix=subpix)
+    expected = np.sqrt(np.sum(w**2) * (err**2 + level / gain))
+    assert_allclose(fluxerr, expected, rtol=rtol)
+
+    # The noise of the local background subtracted over the aperture, both with
+    # and without sigma clipping. The annulus is always measured with subpix=1,
+    # i.e. whole pixels with weight 1, so it is err / sqrt(npix) per pixel
+    rin, rout = 6.2, 9.7
+    npix, _, _ = sep.sum_circann(np.ones(shape), [x], [y], rin, rout, subpix=1)
+    bkg_err = err / np.sqrt(npix) * np.sum(w)
+    expected = np.hypot(err * np.sqrt(np.sum(w**2)), bkg_err)
+    for clip_iters in [0, 5]:
+        flux, fluxerr, _ = sep.sum_circle(
+            data, [x], [y], r, err=err, subpix=subpix, bkgann=(rin, rout), clip_iters=clip_iters
+        )
+        assert_allclose(flux, 0.0, atol=1.0e-6)
+        assert_allclose(fluxerr, expected, rtol=rtol)
 
 
 @pytest.mark.parametrize("clip_iters", [0, 5])

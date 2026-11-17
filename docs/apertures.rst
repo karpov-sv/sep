@@ -74,12 +74,15 @@ The error is calculated as
 
 .. math::
 
-   \sigma_F^2 = \sum_i \sigma_i^2 + F/g
+   \sigma_F^2 = \sum_i w_i^2 \sigma_i^2 + \sum_i w_i^2 D_i / g
 
-where the sum is over pixels in the aperture, :math:`\sigma_i` is the
-noise in each pixel, :math:`F` is the sum in the aperture and
-:math:`g` is the gain. The last term is not added if ``gain`` is
-`None`.
+where the sum is over pixels in the aperture, :math:`w_i` is the fraction
+of the pixel inside the aperture, :math:`\sigma_i` is the noise and
+:math:`D_i` the data value in each pixel, and :math:`g` is the gain. This
+is the variance of the weighted sum :math:`F = \sum_i w_i D_i`, as in
+photutils 3.1 and later. SExtractor uses :math:`w_i` instead of
+:math:`w_i^2`, which overestimates the noise of the pixels on the aperture
+edge. The last term is not added if ``gain`` is `None`.
 
 **Optimal extraction**
 

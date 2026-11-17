@@ -2358,7 +2358,7 @@ int sep_stats_circann(
   PIXTYPE pix;
   double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
   double rin2, rin_in2, rin_out2, rout2, rout_in2, rout_out2;
-  double totw, sumw, varw, diff, wsum, vsum;
+  double totw, sumw, varw, diff, wsum, vsum, vsum2;
   double sigtv, varpix, varpix_const;
   double med, madv, sig, totw_keep;
   double lo, hi;
@@ -2636,12 +2636,15 @@ int sep_stats_circann(
   /* Background mean and uncertainty must use the same retained pixels. */
   wsum = 0.0;
   vsum = 0.0;
+  vsum2 = 0.0;
   sigtv = 0.0;
   for (i = 0; i < nvals; i++) {
     if (keep[i] && vw[i].w > 0.0) {
       wsum += vw[i].w;
       vsum += vw[i].w * vw[i].v;
-      sigtv += vw[i].w * vw[i].var;
+      /* variance of the overlap-weighted sum uses the squared weights */
+      vsum2 += vw[i].w * vw[i].w * vw[i].v;
+      sigtv += vw[i].w * vw[i].w * vw[i].var;
     }
   }
   *mean_clip = (wsum > 0.0) ? (vsum / wsum) : NAN;
@@ -2658,8 +2661,8 @@ int sep_stats_circann(
   madv = weighted_median_sorted(vw, nvals, totw);
   *mad_std = madv * mad_scale;
 
-  if (im->gain > 0.0 && vsum > 0.0) {
-    sigtv += vsum / im->gain;
+  if (im->gain > 0.0 && vsum2 > 0.0) {
+    sigtv += vsum2 / im->gain;
   }
   if (sigtv < 0.0) {
     sigtv = 0.0;
@@ -2711,7 +2714,7 @@ int sep_stats_ellipann(
   double dx, dy, dx1, dy2, offset, scale, scale2, rpix2, overlap;
   double cxx, cyy, cxy;
   double rin2, rin_in2, rin_out2, rout2, rout_in2, rout_out2;
-  double totw, sumw, varw, diff, wsum, vsum;
+  double totw, sumw, varw, diff, wsum, vsum, vsum2;
   double sigtv, varpix, varpix_const;
   double med, madv, sig, totw_keep;
   double lo, hi;
@@ -2978,12 +2981,15 @@ int sep_stats_ellipann(
   /* Background mean and uncertainty must use the same retained pixels. */
   wsum = 0.0;
   vsum = 0.0;
+  vsum2 = 0.0;
   sigtv = 0.0;
   for (i = 0; i < nvals; i++) {
     if (keep[i] && vw[i].w > 0.0) {
       wsum += vw[i].w;
       vsum += vw[i].w * vw[i].v;
-      sigtv += vw[i].w * vw[i].var;
+      /* variance of the overlap-weighted sum uses the squared weights */
+      vsum2 += vw[i].w * vw[i].w * vw[i].v;
+      sigtv += vw[i].w * vw[i].w * vw[i].var;
     }
   }
   *mean_clip = (wsum > 0.0) ? (vsum / wsum) : NAN;
@@ -2998,8 +3004,8 @@ int sep_stats_ellipann(
   madv = weighted_median_sorted(vw, nvals, totw);
   *mad_std = madv * mad_scale;
 
-  if (im->gain > 0.0 && vsum > 0.0) {
-    sigtv += vsum / im->gain;
+  if (im->gain > 0.0 && vsum2 > 0.0) {
+    sigtv += vsum2 / im->gain;
   }
   if (sigtv < 0.0) {
     sigtv = 0.0;
