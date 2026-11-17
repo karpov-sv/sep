@@ -1,6 +1,9 @@
 Unreleased
 ==========
 
+v1.5.4 (17 November 2026)
+========================
+
 * Aperture sums (`sum_circle`, `sum_ellipse`, `sum_circann`, `sum_ellipann`)
   now compute the uncertainty as the variance of the overlap-weighted sum,
   using the squared pixel overlap fractions for both the per-pixel noise and
